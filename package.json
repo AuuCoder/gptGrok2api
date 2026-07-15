@@ -1,0 +1,9 @@
+{
+  "name": "chatgpt2api-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JavaScript runtime dependencies used by protocol registration helpers.",
+  "dependencies": {
+    "jsdom": "26.1.0"
+  }
+}

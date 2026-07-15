@@ -1,0 +1,162 @@
+# ChatGPT2API 配置示例
+#
+# 说明：
+# - 仓库只保存这个示例文件，运行时仍然使用 config.json。
+# - Docker 安装脚本会自动生成 config.json；手动部署时可以按本文件内容在控制台里配置，
+#   或自行创建 config.json。
+# - 敏感信息（auth-key、代理、R2、WebDAV、Git Token 等）不要提交到仓库。
+
+auth-key: chatgpt2api
+refresh_account_interval_minute: 5
+image_retention_days: 15
+log_retention_days: 30
+image_poll_timeout_secs: 120
+image_stream_timeout_secs: 300
+image_poll_interval_secs: 10
+image_poll_initial_wait_secs: 10
+image_account_concurrency: 3
+image_parallel_generation: true
+image_remove_conversation_after_result: false
+image_min_free_mb: 500
+image_settle_enabled: false
+image_check_before_hit_enabled: false
+image_settle_secs: 2
+image_timeout_retry_secs: 30
+
+auto_remove_rate_limited_accounts: false
+auto_remove_invalid_accounts: true
+auto_relogin_after_refresh: false
+
+log_levels:
+  - debug
+  - info
+  - warning
+  - error
+
+proxy: ""
+fallback_proxy: ""
+base_url: ""
+sensitive_words: []
+global_system_prompt: ""
+
+proxy_runtime:
+  enabled: false
+  egress_mode: direct
+  proxy_url: ""
+  resource_proxy_url: ""
+  skip_ssl_verify: false
+  reset_session_status_codes:
+    - 403
+  clearance:
+    enabled: false
+    mode: none
+    cf_cookies: ""
+    cf_clearance: ""
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+    browser: chrome
+    flaresolverr_url: ""
+    timeout_sec: 60
+    refresh_interval: 3600
+    warm_up_on_start: false
+
+image_storage:
+  enabled: false
+  mode: local
+  webdav_url: ""
+  webdav_username: ""
+  webdav_password: ""
+  webdav_root_path: chatgpt2api/images
+  public_base_url: ""
+
+chat_completion_cache:
+  enabled: true
+  ttl_seconds: 60
+  max_entries: 256
+  dedupe_inflight: true
+  stream_cache: true
+  normalize_messages: true
+  drop_adjacent_duplicates: true
+  drop_assistant_history: false
+
+image_error_friendly_enabled: true
+image_error_messages:
+  fallback: 图片生成请求失败，请稍后重试。
+  quota: 图片账号额度已用完，请稍后再试或联系管理员。
+  no_account: 当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。
+  local_busy: 当前没有可用的图片账号或账号并发已满，请稍后重试。
+  unsupported_model: 当前模型不支持图片生成，请检查 model 参数。
+  poll_timeout: 图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。
+  stream_interrupted: 图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。
+  connection_failed: 连接上游图片服务失败，可能是网络或代理波动，请重试。
+  connection_timeout: 连接上游图片服务超时，请稍后重试。
+  token_invalid: 图片生成账号状态异常，请稍后重试。
+  text_reply: 上游返回了 {text} 文本说明，未生成图片。请调整提示词或重试。
+
+ai_review:
+  enabled: false
+  base_url: ""
+  api_key: ""
+  model: ""
+  prompt: ""
+
+backup:
+  enabled: false
+  provider: cloudflare_r2
+  account_id: ""
+  access_key_id: ""
+  secret_access_key: ""
+  bucket: ""
+  prefix: backups
+  interval_minutes: 1440
+  rotation_keep: 10
+  encrypt: false
+  passphrase: ""
+  include:
+    config: true
+    register: true
+    cpa: true
+    sub2api: true
+    logs: true
+    dashboard_metrics: true
+    image_tasks: true
+    accounts_snapshot: true
+    auth_keys_snapshot: true
+    images: false
+
+third_party_apps:
+  infinite_canvas:
+    enabled: true
+    url: https://canvas.best
+
+basic:
+  api_key: ""
+  base_url: ""
+  proxy: ""
+  image_expire_hours: 15
+
+image_generation:
+  enabled: true
+  supported_models: []
+  model_options: []
+  block_rich_output_on_base_chat_models: true
+  output_format: url
+  nanobanana_lane: fast
+  nanobanana_lane_order:
+    - fast
+
+quota_limits:
+  enabled: true
+  fast_daily_limit: -1
+  thinking_daily_limit: -1
+  pro_daily_limit: -1
+  image_daily_limit: -1
+  music_daily_limit: -1
+  video_daily_limit: -1
+
+runtime_capacity:
+  uvicorn_workers: 4
+  text_concurrency_limit: 120
+  image_concurrency_limit: 24
+  request_queue_timeout_seconds: 2
+
+proxy_profiles: []

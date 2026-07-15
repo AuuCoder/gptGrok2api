@@ -1,0 +1,53 @@
+# Python-generated files
+.DS_Store
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+web_dist
+node_modules/
+# Virtual environments
+.venv
+.idea
+data
+config.json
+config.local*.json
+edit
+
+docker-compose-local.yml
+
+.claude/settings.local.json
+
+# Environment variables
+.env
+.env.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Git cache
+git_cache/
+
+# 调试/测试输出目录
+.codex/run-logs/
+.playwright-mcp/
+/logs/
+*.log
+/runtime/
+services/checkout_protocol/proxy_state.json
+loginwithpassword_*/
+logwithemailverifycode_*/
+test_batch_output/
+
+# 本地实验/生成物
+skills/
+standalone/
+test/
+tests/
+docs/*.md
+scripts/test_*.py
+/web/

@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账号数据管理 - iCloud Privacy Mail</title>
+  <style>
+    :root {
+      --bg: #eef8f6;
+      --panel: rgba(255,255,255,.94);
+      --panel-soft: rgba(248,251,255,.78);
+      --line: rgba(118,143,174,.22);
+      --line-strong: rgba(132,156,188,.34);
+      --text: #061637;
+      --muted: #4e6483;
+      --faint: #8290a8;
+      --green: #13b8a6;
+      --green-dark: #059b87;
+      --red: #dc2626;
+      --shadow: 0 28px 90px rgba(17,70,101,.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 0 12%, rgba(19,184,166,.18), transparent 30%),
+        radial-gradient(circle at 95% 0, rgba(56,189,248,.13), transparent 28%),
+        linear-gradient(180deg, #f8fbff 0%, #eef8f6 50%, #f7fbfa 100%);
+    }
+    button, select, input { font: inherit; }
+    .shell { display: grid; grid-template-columns: 238px minmax(0, 1fr); min-height: 100vh; }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 18px 16px;
+      border-right: 1px solid var(--line);
+      background: rgba(255,255,255,.86);
+      backdrop-filter: blur(18px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 8px 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 12px;
+      font-weight: 900;
+      letter-spacing: -.02em;
+    }
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: #fff;
+      background: linear-gradient(135deg, #13b8a6, #17c9ae);
+      box-shadow: 0 12px 24px rgba(19,184,166,.2);
+    }
+    .nav { display: grid; gap: 6px; padding: 4px 0 14px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+    .nav button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border: 0;
+      border-radius: 12px;
+      padding: 11px 12px;
+      text-align: left;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .nav button:hover { background: #f3fffb; color: var(--green-dark); }
+    .nav button.active { background: linear-gradient(135deg, #13b8a6, #17c9ae); color: #fff; }
+    .nav-icon { width: 20px; text-align: center; opacity: .86; }
+    .side-note {
+      padding: 12px;
+      color: var(--faint);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .content { min-width: 0; }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: rgba(248,253,252,.76);
+      backdrop-filter: blur(18px);
+    }
+    .topbar, main {
+      width: min(1480px, 100%);
+      margin: 0 auto;
+      padding-left: 28px;
+      padding-right: 28px;
+    }
+    .topbar {
+      min-height: 124px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding-top: 22px;
+      padding-bottom: 22px;
+    }
+    .eyebrow {
+      color: var(--green-dark);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    h1 { margin: 0; font-size: 31px; line-height: 1.15; letter-spacing: -.04em; }
+    h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .subtitle { margin-top: 8px; color: var(--muted); line-height: 1.6; }
+    .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+    .actions select.export-format { width: auto; min-width: 94px; border: 1px solid var(--line-strong); border-radius: 12px; background: rgba(255,255,255,.9); color: var(--text); padding: 10px 12px; font-weight: 850; }
+    .actions select.export-account { width: auto; min-width: 190px; max-width: 260px; border: 1px solid var(--line-strong); border-radius: 12px; background: rgba(255,255,255,.9); color: var(--text); padding: 10px 12px; font-weight: 850; }
+    .btn {
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      background: rgba(255,255,255,.9);
+      color: var(--text);
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 850;
+      white-space: nowrap;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+    }
+    .btn:hover { transform: translateY(-1px); border-color: rgba(19,184,166,.5); background: #f3fffb; }
+    .btn.primary { border-color: transparent; color: #fff; background: linear-gradient(135deg, #13b8a6, #17c9ae); box-shadow: 0 12px 26px rgba(19,184,166,.18); }
+    .btn.small { padding: 7px 10px; border-radius: 9px; font-size: 12px; }
+    .btn.danger { color: var(--red); border-color: rgba(220,38,38,.3); background: #fff7f7; }
+    .btn.danger:hover { border-color: rgba(220,38,38,.55); background: #fff1f1; }
+    main { padding-top: 22px; padding-bottom: 34px; }
+    .view-section { display: none; }
+    .view-section.active { display: block; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stats.view-section.active { display: grid; }
+    .stat-card, .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .stat-card {
+      min-height: 104px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .stat-card strong { display: block; font-size: 36px; line-height: 1; letter-spacing: -.04em; margin-bottom: 12px; }
+    .stat-card span { color: var(--muted); font-size: 13px; }
+    .panel { margin-bottom: 18px; }
+    .account-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      padding: 16px 18px 18px;
+    }
+    .account-card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(248,251,255,.76);
+      cursor: pointer;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+    }
+    .account-card:hover { transform: translateY(-1px); border-color: rgba(19,184,166,.46); background: #f3fffb; }
+    .account-card.active { border-color: rgba(19,184,166,.7); background: rgba(236,253,245,.92); box-shadow: inset 0 0 0 1px rgba(19,184,166,.18); }
+    .account-card-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 12px; }
+    .account-name { font-weight: 950; letter-spacing: -.02em; word-break: break-all; }
+    .account-id { color: var(--faint); font-size: 12px; margin-top: 3px; }
+    .mini-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .mini-stat { border: 1px solid rgba(118,143,174,.16); border-radius: 12px; background: rgba(255,255,255,.72); padding: 9px; }
+    .mini-stat strong { display: block; font-size: 18px; line-height: 1; margin-bottom: 5px; }
+    .mini-stat span { color: var(--faint); font-size: 11px; }
+    .filter-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      padding-top: 4px;
+    }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      padding: 17px 18px 14px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,.92), rgba(246,252,251,.72));
+    }
+    .panel-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .panel-tools {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    }
+    .pager {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .pager .btn { padding: 8px 11px; border-radius: 10px; }
+    .page-size {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .page-size input {
+      width: 76px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: rgba(255,255,255,.92);
+      color: var(--text);
+      padding: 8px 10px;
+      font-weight: 850;
+      outline: none;
+    }
+    .page-size input:focus {
+      border-color: rgba(19,184,166,.62);
+      box-shadow: 0 0 0 4px rgba(19,184,166,.12);
+    }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; min-width: 900px; border-collapse: collapse; }
+    th, td { border-top: 1px solid rgba(118,143,174,.16); padding: 13px 14px; text-align: left; vertical-align: middle; }
+    th { color: var(--muted); background: #f7fbff; font-size: 12px; font-weight: 900; }
+    tbody tr:hover { background: rgba(19,184,166,.045); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .email { color: #0f766e; font-weight: 900; }
+    .muted { color: var(--faint); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid rgba(19,184,166,.22);
+      border-radius: 999px;
+      padding: 4px 9px;
+      color: #047857;
+      background: rgba(209,250,229,.78);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .pill.gray { color: #475569; border-color: rgba(100,116,139,.18); background: rgba(241,245,249,.9); }
+    .pill.red { color: #b91c1c; border-color: rgba(220,38,38,.2); background: #fff5f5; }
+    .pill.amber { color: #a16207; border-color: rgba(180,83,9,.2); background: #fffbeb; }
+    .empty {
+      padding: 22px 18px;
+      color: var(--faint);
+      border-top: 1px solid rgba(118,143,174,.16);
+      background: rgba(248,251,255,.72);
+    }
+    .log {
+      margin: 0;
+      min-height: 140px;
+      max-height: 260px;
+      overflow: auto;
+      padding: 16px 18px;
+      border-top: 1px solid rgba(118,143,174,.16);
+      background: var(--panel-soft);
+      color: #334155;
+      white-space: pre-wrap;
+      font: 13px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    @media (max-width: 1180px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); display: grid; }
+      .side-note { display: none; }
+    }
+    @media (max-width: 760px) {
+      .topbar, main { padding-left: 16px; padding-right: 16px; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .actions { justify-content: flex-start; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .panel-tools { justify-content: flex-start; width: 100%; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .nav { grid-template-columns: 1fr 1fr; }
+      h1 { font-size: 28px; }
+      .stat-card strong { font-size: 30px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">✉</div>
+        <div>Privacy Mail</div>
+      </div>
+      <nav class="nav">
+        <button class="active" data-view="overview" onclick="setActiveView('overview')"><span class="nav-icon">⌂</span>仪表盘</button>
+        <button data-view="accountManage" onclick="setActiveView('accountManage')"><span class="nav-icon">▣</span>账号管理</button>
+        <button data-view="users" onclick="setActiveView('users')"><span class="nav-icon">◉</span>用户列表</button>
+        <button data-view="mailboxes" onclick="setActiveView('mailboxes')"><span class="nav-icon">✉</span>隐私邮箱</button>
+        <button data-view="accounts" onclick="setActiveView('accounts')"><span class="nav-icon">◎</span>登录账号</button>
+        <button data-view="logs" onclick="setActiveView('logs')"><span class="nav-icon">☰</span>运行日志</button>
+        <button onclick="refresh()"><span class="nav-icon">↻</span>刷新数据</button>
+      </nav>
+      <div class="side-note">左侧切换分类；在“账号管理”点某个网站账号后，其它分类会只显示这个人的数据。</div>
+    </aside>
+
+    <div class="content">
+      <header>
+        <div class="topbar">
+          <div>
+            <div class="eyebrow">Data Manager</div>
+            <h1>账号数据管理</h1>
+            <div class="subtitle" id="whoami">正在读取账号...</div>
+          </div>
+          <div class="actions">
+            <button class="btn" onclick="location.href='/'">生成隐私邮箱</button>
+            <button class="btn primary" onclick="refresh()">刷新</button>
+            <button class="btn" onclick="exportData()">导出数据</button>
+            <select id="mailboxExportFormat" class="export-format" title="导出格式">
+              <option value="txt">TXT</option>
+              <option value="csv">CSV</option>
+              <option value="tsv">TSV</option>
+              <option value="jsonl">JSONL</option>
+            </select>
+            <select id="mailboxExportAccount" class="export-account" title="导出账号范围">
+              <option value="">当前查看全部登录态</option>
+            </select>
+            <button class="btn" onclick="exportMailboxAPIs()">导出邮箱API</button>
+            <button class="btn" onclick="exportMailboxEmails()">只导出邮箱</button>
+            <button class="btn" onclick="logout()">退出登录</button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="stats view-section active" data-view="overview">
+          <div class="stat-card"><strong id="userCount">0</strong><span>用户数</span></div>
+          <div class="stat-card"><strong id="accountCount">0</strong><span>登录账号</span></div>
+          <div class="stat-card"><strong id="mailboxCount">0</strong><span>隐私邮箱</span></div>
+          <div class="stat-card"><strong id="messageCount">0</strong><span>验证码邮件</span></div>
+        </section>
+
+        <section class="panel view-section" id="accountManagePanel" data-view="accountManage">
+          <div class="panel-head">
+            <div>
+              <h2>网站账号管理</h2>
+              <p>查看每个网站注册账号生成了多少邮箱、保存了多少登录账号和验证码邮件。</p>
+              <div class="filter-line">当前查看：<span id="currentScope">全部账号</span></div>
+            </div>
+          </div>
+          <div class="account-grid" id="accountCards"></div>
+          <div class="empty" id="accountCardsEmpty" hidden>暂无账号数据</div>
+        </section>
+
+        <section class="panel view-section" id="usersPanel" data-view="users">
+          <div class="panel-head">
+            <div><h2>用户列表</h2><p>管理员显示全部用户；普通用户只显示自己。</p></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>最后登录</th><th>操作</th></tr></thead>
+              <tbody id="users"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="usersEmpty" hidden>暂无用户数据</div>
+        </section>
+
+        <section class="panel view-section" id="mailboxesPanel" data-view="mailboxes">
+          <div class="panel-head">
+            <div><h2>隐私邮箱数据</h2><p>当前账号有权限查看的隐私邮箱。</p></div>
+            <div class="panel-tools">
+              <label class="page-size">每页
+                <input id="mailboxPageSize" type="number" min="1" max="500" value="10" onchange="setMailboxPageSize(this.value)" onkeydown="if(event.key === 'Enter') setMailboxPageSize(this.value)">
+                条
+              </label>
+              <div class="pager">
+                <button class="btn" id="mailboxPrevPage" onclick="changeMailboxPage(-1)">上一页</button>
+                <span id="mailboxPageInfo">第 1/1 页 · 0-0/0</span>
+                <button class="btn" id="mailboxNextPage" onclick="changeMailboxPage(1)">下一页</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>归属</th><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>创建时间</th></tr></thead>
+              <tbody id="mailboxes"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="mailboxesEmpty" hidden>暂无隐私邮箱数据</div>
+        </section>
+
+        <section class="panel view-section" id="accountsPanel" data-view="accounts">
+          <div class="panel-head">
+            <div><h2>登录账号数据</h2><p>已保存的 Apple/iCloud 登录账号标签。</p></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>归属</th><th>标签</th><th>Apple ID</th><th>状态</th><th>备注</th><th>创建时间</th></tr></thead>
+              <tbody id="accounts"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="accountsEmpty" hidden>暂无登录账号数据</div>
+        </section>
+
+        <section class="panel view-section" data-view="logs">
+          <div class="panel-head">
+            <div><h2>运行日志</h2><p>最近操作。</p></div>
+          </div>
+          <div class="actions" style="padding:14px 18px; border-top:1px solid rgba(118,143,174,.16);">
+            <button class="btn" onclick="copyLog()">复制日志</button>
+            <button class="btn danger" onclick="clearLog()">清除日志</button>
+          </div>
+          <pre class="log" id="log">等待操作...</pre>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    let currentUser = null;
+    let manageData = null;
+    let selectedOwner = 'all';
+    const viewStorageKey = 'ipm_manage_active_view';
+    const mailboxPageSizeStorage = 'ipm_manage_mailbox_page_size';
+    const defaultMailboxPageSize = 10;
+    let mailboxPage = 1;
+    let mailboxPageSize = defaultMailboxPageSize;
+    const viewMeta = {
+      overview: '仪表盘',
+      accountManage: '账号管理',
+      users: '用户列表',
+      mailboxes: '隐私邮箱',
+      accounts: '登录账号',
+      logs: '运行日志'
+    };
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function log(text) {
+      const el = $('log');
+      if (!el) return;
+      const line = new Date().toLocaleTimeString() + ' ' + text;
+      el.textContent = line + '\n' + (el.textContent === '等待操作...' ? '' : el.textContent);
+    }
+    async function writeClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error('浏览器拒绝访问剪贴板');
+    }
+    async function copyLog() {
+      const el = $('log');
+      if (!el) return;
+      const text = el.textContent === '等待操作...' ? '' : el.textContent;
+      try {
+        await writeClipboard(text);
+        log('已复制日志');
+      } catch (err) {
+        log('复制日志失败：' + err.message);
+      }
+    }
+    function clearLog() {
+      const el = $('log');
+      if (el) el.textContent = '等待操作...';
+    }
+    function pill(text, type='') {
+      return `<span class="pill ${type}">${esc(text || '-')}</span>`;
+    }
+    function statusPill(status) {
+      const s = String(status || '-');
+      if (['failed','disabled'].includes(s)) return pill(s, 'red');
+      if (['used'].includes(s)) return pill(s, 'amber');
+      if (['active','available'].includes(s)) return pill(s);
+      return pill(s, 'gray');
+    }
+    function scrollToPanel(id) {
+      const el = $(id);
+      if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+    function setActiveView(view) {
+      const normalized = viewMeta[view] ? view : 'overview';
+      for (const button of document.querySelectorAll('.nav button[data-view]')) {
+        button.classList.toggle('active', button.dataset.view === normalized);
+      }
+      for (const section of document.querySelectorAll('.view-section[data-view]')) {
+        section.classList.toggle('active', section.dataset.view === normalized);
+      }
+      try {
+        localStorage.setItem(viewStorageKey, normalized);
+      } catch (_) {}
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    }
+    function initViewNavigation() {
+      let saved = 'overview';
+      try {
+        saved = localStorage.getItem(viewStorageKey) || 'overview';
+      } catch (_) {}
+      setActiveView(saved);
+    }
+    function ownerID(row) {
+      return String(row && row.owner_id != null ? row.owner_id : '');
+    }
+    function inScope(row) {
+      return selectedOwner === 'all' || ownerID(row) === selectedOwner;
+    }
+    function bindAccountCards() {
+      document.querySelectorAll('.account-card').forEach(card => {
+        card.addEventListener('click', () => selectOwner(card.dataset.owner || ''));
+      });
+    }
+    function selectOwner(owner) {
+      selectedOwner = owner;
+      mailboxPage = 1;
+      renderData();
+      const label = selectedOwner === 'all' ? '全部账号' : ($('currentScope').textContent || selectedOwner);
+      log('已切换查看：' + label);
+      scrollToPanel('accountManagePanel');
+    }
+    function normalizeMailboxPageSize(value) {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) return defaultMailboxPageSize;
+      return Math.min(parsed, 500);
+    }
+    function initMailboxPagination() {
+      try {
+        mailboxPageSize = normalizeMailboxPageSize(localStorage.getItem(mailboxPageSizeStorage) || defaultMailboxPageSize);
+      } catch (_) {
+        mailboxPageSize = defaultMailboxPageSize;
+      }
+      if ($('mailboxPageSize')) $('mailboxPageSize').value = String(mailboxPageSize);
+    }
+    function setMailboxPageSize(value) {
+      mailboxPageSize = normalizeMailboxPageSize(value);
+      mailboxPage = 1;
+      if ($('mailboxPageSize')) $('mailboxPageSize').value = String(mailboxPageSize);
+      try {
+        localStorage.setItem(mailboxPageSizeStorage, String(mailboxPageSize));
+      } catch (_) {}
+      renderData();
+    }
+    function changeMailboxPage(delta) {
+      mailboxPage += delta;
+      renderData();
+    }
+    async function api(path, options={}) {
+      const res = await fetch(path, {credentials:'same-origin', headers:{'content-type':'application/json', ...(options.headers || {})}, ...options});
+      let data;
+      try { data = await res.json(); } catch (_) { throw new Error(`HTTP ${res.status}`); }
+      if (res.status === 401) { location.href = '/login'; throw new Error('请先登录'); }
+      if (!data.success) throw new Error(data.message || data.code || `HTTP ${res.status}`);
+      return data;
+    }
+    async function ensureAuth() {
+      const data = await api('/api/auth/me');
+      if (!data.authenticated) { location.href = '/login'; throw new Error('未登录'); }
+      currentUser = data.user;
+      $('whoami').textContent = `当前账号：${currentUser.username}${currentUser.is_admin ? ' / 管理员，可查看全部数据' : ' / 普通用户，仅查看自己数据'}`;
+    }
+    function renderEmpty(id, rows) {
+      const empty = $(id + 'Empty');
+      if (empty) empty.hidden = rows.length > 0;
+    }
+    async function refresh() {
+      manageData = await api('/api/manage/data');
+      renderData();
+      log('数据已刷新');
+    }
+    async function deleteUser(id) {
+      if (!currentUser || !currentUser.is_admin) return;
+      if (!id || id === currentUser.id) return;
+      const user = (manageData && manageData.users || []).find(u => u.id === id) || {};
+      const name = user.username || id;
+      if (!confirm(`确定删除账号「${name}」吗？该账号的登录态、隐私邮箱和验证码邮件也会一并删除。`)) return;
+      const data = await api('/api/admin/users/' + encodeURIComponent(id), {method:'DELETE'});
+      if (selectedOwner === id) selectedOwner = 'all';
+      await refresh();
+      const deleted = data.deleted || {};
+      log(`已删除账号：${name}；清理邮箱 ${deleted.mailboxes || 0} 个，验证码 ${deleted.messages || 0} 封`);
+    }
+    function renderData() {
+      const data = manageData || {};
+      const users = data.users || [];
+      const summaries = data.user_summaries || [];
+      const accountsAll = data.accounts || [];
+      const mailboxesAll = data.mailboxes || [];
+      const selectedSummary = summaries.find(s => ownerID(s) === selectedOwner);
+      const usersInScope = selectedOwner === 'all' ? users : users.filter(u => u.id === selectedOwner);
+      const accounts = accountsAll.filter(inScope);
+      const mailboxes = mailboxesAll.filter(inScope);
+      const messageCount = selectedOwner === 'all' ? (data.messages || 0) : (selectedSummary ? selectedSummary.message_count || 0 : 0);
+      const scopeName = selectedOwner === 'all' ? '全部账号' : (selectedSummary ? selectedSummary.username : selectedOwner || '管理员/全局');
+
+      $('currentScope').textContent = scopeName;
+      $('userCount').textContent = selectedOwner === 'all' ? users.length : (selectedSummary ? 1 : usersInScope.length);
+      $('accountCount').textContent = accounts.length;
+      $('mailboxCount').textContent = mailboxes.length;
+      $('messageCount').textContent = messageCount;
+
+      const totalAccounts = summaries.reduce((n, s) => n + (s.account_count || 0), 0);
+      const totalMailboxes = summaries.reduce((n, s) => n + (s.mailbox_count || 0), 0);
+      const totalMessages = summaries.reduce((n, s) => n + (s.message_count || 0), 0);
+      const cards = [];
+      cards.push(`
+        <div class="account-card ${selectedOwner === 'all' ? 'active' : ''}" data-owner="all">
+          <div class="account-card-head">
+            <div><div class="account-name">全部账号</div><div class="account-id">all users</div></div>
+            ${pill('汇总')}
+          </div>
+          <div class="mini-stats">
+            <div class="mini-stat"><strong>${users.length}</strong><span>用户</span></div>
+            <div class="mini-stat"><strong>${totalMailboxes}</strong><span>邮箱</span></div>
+            <div class="mini-stat"><strong>${totalAccounts}</strong><span>登录</span></div>
+            <div class="mini-stat"><strong>${totalMessages}</strong><span>验证码</span></div>
+          </div>
+        </div>`);
+      for (const s of summaries) {
+        const oid = ownerID(s);
+        cards.push(`
+          <div class="account-card ${selectedOwner === oid ? 'active' : ''}" data-owner="${esc(oid)}">
+            <div class="account-card-head">
+              <div>
+                <div class="account-name">${esc(s.username || '-')}</div>
+                <div class="account-id">${esc(oid || 'global')}</div>
+              </div>
+              ${s.is_admin ? pill('管理员') : pill('普通', 'gray')}
+            </div>
+            <div class="mini-stats">
+              <div class="mini-stat"><strong>${s.mailbox_count || 0}</strong><span>邮箱</span></div>
+              <div class="mini-stat"><strong>${s.available_mailbox_count || 0}</strong><span>可用</span></div>
+              <div class="mini-stat"><strong>${s.used_mailbox_count || 0}</strong><span>已用</span></div>
+              <div class="mini-stat"><strong>${s.message_count || 0}</strong><span>验证码</span></div>
+            </div>
+            <div style="margin-top:10px">${s.icloud_session_saved ? pill('已保存登录态') : pill('无登录态', 'gray')} ${statusPill(s.status)}</div>
+          </div>`);
+      }
+      $('accountCards').innerHTML = cards.join('');
+      renderEmpty('accountCards', cards);
+      bindAccountCards();
+
+      $('users').innerHTML = usersInScope.map(u => `
+        <tr>
+          <td class="mono">${esc(u.id)}</td>
+          <td>${esc(u.username)}</td>
+          <td>${u.is_admin ? pill('管理员') : pill('普通', 'gray')}</td>
+          <td>${statusPill(u.status)}</td>
+          <td>${esc(u.created_at || '-')}</td>
+          <td>${esc(u.last_login_at || '-')}</td>
+          <td>${currentUser && currentUser.is_admin && !u.is_admin && u.id !== currentUser.id ? `<button class="btn small danger" onclick="deleteUser('${esc(u.id)}')">删除</button>` : '-'}</td>
+        </tr>`).join('');
+      renderEmpty('users', usersInScope);
+
+      renderMailboxRows(mailboxes);
+
+      $('accounts').innerHTML = accounts.map(a => `
+        <tr>
+          <td class="mono">${esc(a.id)}</td>
+          <td>${esc(a.owner || '-')}</td>
+          <td>${esc(a.label || '-')}</td>
+          <td>${esc(a.apple_id || '-')}</td>
+          <td>${statusPill(a.status)} ${statusPill(a.icloud_status)}</td>
+          <td>${esc(a.note || '-')}</td>
+          <td>${esc(a.created_at || '-')}</td>
+        </tr>`).join('');
+      renderEmpty('accounts', accounts);
+      renderMailboxExportAccountOptions(accounts, mailboxes);
+    }
+    function renderMailboxRows(mailboxes) {
+      const totalRows = mailboxes.length;
+      const totalPages = Math.max(1, Math.ceil(totalRows / mailboxPageSize));
+      mailboxPage = Math.max(1, Math.min(mailboxPage, totalPages));
+      const start = (mailboxPage - 1) * mailboxPageSize;
+      const pageRows = mailboxes.slice(start, start + mailboxPageSize);
+      const rangeStart = totalRows === 0 ? 0 : start + 1;
+      const rangeEnd = Math.min(start + mailboxPageSize, totalRows);
+
+      if ($('mailboxPageInfo')) {
+        $('mailboxPageInfo').textContent = `第 ${mailboxPage}/${totalPages} 页 · ${rangeStart}-${rangeEnd}/${totalRows}`;
+      }
+      if ($('mailboxPrevPage')) $('mailboxPrevPage').disabled = mailboxPage <= 1;
+      if ($('mailboxNextPage')) $('mailboxNextPage').disabled = mailboxPage >= totalPages;
+
+      $('mailboxes').innerHTML = pageRows.map(m => `
+        <tr>
+          <td class="mono">${esc(m.id)}</td>
+          <td>${esc(m.owner || '-')}</td>
+          <td>${esc(m.label || '-')}</td>
+          <td><span class="email">${esc(m.email || '-')}</span></td>
+          <td>${statusPill(m.status)}</td>
+          <td>${m.receive_count || 0}</td>
+          <td>${esc(m.created_at || '-')}</td>
+        </tr>`).join('');
+      renderEmpty('mailboxes', mailboxes);
+    }
+    async function exportData() {
+      const res = await fetch('/api/runtime/export', {credentials:'same-origin'});
+      if (!res.ok) {
+        if (res.status === 401) location.href='/login';
+        log('导出失败：HTTP ' + res.status);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/i);
+      const filename = match ? match[1] : `icloud-privacy-mail-state-${Date.now()}.json`;
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{description: 'JSON 文件', accept: {'application/json': ['.json']}}],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          log('数据已导出');
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            log('已取消导出');
+            return;
+          }
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      log('数据已导出');
+    }
+    function selectedMailboxExportFormat() {
+      const el = $('mailboxExportFormat');
+      return el && el.value ? el.value : 'txt';
+    }
+
+    function renderMailboxExportAccountOptions(accounts, mailboxes) {
+      const select = $('mailboxExportAccount');
+      if (!select) return;
+      const current = select.value || '';
+      const counts = new Map();
+      for (const mailbox of mailboxes || []) {
+        if (mailbox.account_id) counts.set(mailbox.account_id, (counts.get(mailbox.account_id) || 0) + 1);
+      }
+      const options = ['<option value="">当前查看全部登录态</option>'];
+      for (const account of accounts || []) {
+        const count = counts.get(account.id) || 0;
+        const title = [account.label, account.apple_id].filter(Boolean).join(' / ') || account.id;
+        options.push(`<option value="${esc(account.id)}">${esc(title)} · ${count}</option>`);
+      }
+      select.innerHTML = options.join('');
+      const values = new Set(['', ...(accounts || []).map(account => account.id)]);
+      select.value = values.has(current) ? current : '';
+    }
+
+    function mailboxExportURL(path, format) {
+      const params = new URLSearchParams({format});
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
+      if (selectedOwner && selectedOwner !== 'all') params.set('owner_id', selectedOwner);
+      if (accountID) params.set('account_id', accountID);
+      return `${path}?${params.toString()}`;
+    }
+
+    function exportFileTypes(format) {
+      if (format === 'csv') {
+        return [{description: 'CSV 文件', accept: {'text/csv': ['.csv']}}];
+      }
+      if (format === 'tsv') {
+        return [{description: 'TSV 文件', accept: {'text/tab-separated-values': ['.tsv']}}];
+      }
+      if (format === 'jsonl') {
+        return [{description: 'JSONL 文件', accept: {'application/x-ndjson': ['.jsonl']}}];
+      }
+      return [{description: 'TXT 文件', accept: {'text/plain': ['.txt']}}];
+    }
+
+    async function downloadExportFile(path, fallbackName, format, cancelText, successText, failText) {
+      const res = await fetch(path, {credentials:'same-origin'});
+      if (!res.ok) {
+        if (res.status === 401) {
+          location.href='/login';
+          return;
+        }
+        log(failText + '：HTTP ' + res.status);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/i);
+      const filename = match ? match[1] : fallbackName;
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: exportFileTypes(format),
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          log(successText);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            log(cancelText);
+            return;
+          }
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      log(successText);
+    }
+
+    async function exportMailboxAPIs() {
+      const format = selectedMailboxExportFormat();
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
+      await downloadExportFile(
+        mailboxExportURL('/api/runtime/export-mailbox-apis', format),
+        `icloud-mailbox-apis-${Date.now()}.${format}`,
+        format,
+        '已取消导出邮箱API',
+        `邮箱API已导出 ${format.toUpperCase()}：${accountID ? '指定登录态' : '当前查看范围'}，每行一个邮箱API`,
+        '导出邮箱API失败'
+      );
+    }
+
+    async function exportMailboxEmails() {
+      const format = selectedMailboxExportFormat();
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
+      await downloadExportFile(
+        mailboxExportURL('/api/runtime/export-mailbox-emails', format),
+        `icloud-mailbox-emails-${Date.now()}.${format}`,
+        format,
+        '已取消导出邮箱',
+        `邮箱已导出 ${format.toUpperCase()}：${accountID ? '指定登录态' : '当前查看范围'}，一行一个邮箱`,
+        '导出邮箱失败'
+      );
+    }
+    async function logout() {
+      await api('/api/auth/logout', {method:'POST', body:'{}'});
+      location.href = '/login';
+    }
+
+    initViewNavigation();
+    initMailboxPagination();
+    ensureAuth().then(refresh).catch(err => log(err.message));
+  </script>
+</body>
+</html>

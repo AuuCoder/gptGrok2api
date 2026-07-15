@@ -1,0 +1,52 @@
+services:
+  icloud-privacy-mail:
+    profiles: ["local-icloud"]
+    build:
+      context: .
+      dockerfile: deploy/icloud-privacy-mail/Dockerfile
+    image: ${ICLOUD_PRIVACY_MAIL_IMAGE:-chatgpt2api/icloud-privacy-mail:2026.07.14.1}
+    container_name: chatgpt2api-icloud-privacy-mail
+    restart: unless-stopped
+    environment:
+      IPM_API_KEY: ${ICLOUD_PRIVACY_MAIL_API_KEY:-}
+      IPM_PUBLIC_BASE_URL: ${ICLOUD_PRIVACY_MAIL_PUBLIC_BASE_URL:-http://icloud-privacy-mail:8787}
+      IPM_UPDATE_ENABLED: "false"
+      HTTP_PROXY: ${ICLOUD_PRIVACY_MAIL_HTTP_PROXY:-}
+      HTTPS_PROXY: ${ICLOUD_PRIVACY_MAIL_HTTPS_PROXY:-}
+      NO_PROXY: ${ICLOUD_PRIVACY_MAIL_NO_PROXY:-127.0.0.1,localhost,icloud-privacy-mail}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data/icloud-privacy-mail:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/login >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${CHATGPT2API_IMAGE:-chatgpt2api:local}
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "${CHATGPT2API_PORT:-3000}:80"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json
+    environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
+      DATABASE_URL: ${DATABASE_URL:-}
+      GIT_REPO_URL: ${GIT_REPO_URL:-}
+      GIT_TOKEN: ${GIT_TOKEN:-}
+      GIT_BRANCH: ${GIT_BRANCH:-main}
+      GIT_FILE_PATH: ${GIT_FILE_PATH:-accounts.json}
+      GIT_AUTH_KEYS_FILE_PATH: ${GIT_AUTH_KEYS_FILE_PATH:-auth_keys.json}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
+      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
+      CHATGPT2API_THREAD_TOKENS: ${CHATGPT2API_THREAD_TOKENS:-80}
+      ICLOUD_PRIVACY_MAIL_BASE_URL: ${ICLOUD_PRIVACY_MAIL_BASE_URL:-http://icloud-privacy-mail:8787}
+      TZ: ${TZ:-Asia/Shanghai}
