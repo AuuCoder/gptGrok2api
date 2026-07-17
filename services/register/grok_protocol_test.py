@@ -691,7 +691,19 @@ class GrokWorkerTest(unittest.TestCase):
             "relay@icloud.example",
             "AB-C 123",
         )
-        self.assertIn("[任务1] 已收到 Grok 验证码:   AB-C 123  ", log_messages)
+        self.assertEqual(
+            log_messages[:-1],
+            [
+                "[任务1] 准备注册环境",
+                "[任务1] 获取注册邮箱",
+                "[任务1] 验证码已发送，等待邮件",
+                "[任务1] 邮箱验证完成，正在进行安全校验",
+                "[任务1] 安全校验完成，正在创建账号",
+            ],
+        )
+        self.assertRegex(log_messages[-1], r"^\[任务1\] 注册成功（\d+\.\d 秒）$")
+        self.assertNotIn("AB-C 123", "\n".join(log_messages))
+        self.assertNotIn("relay@icloud.example", "\n".join(log_messages))
         call_names = [call[0] for call in client.method_calls]
         self.assertLess(call_names.index("verify_email_validation_code"), call_names.index("solve_turnstile"))
         mark_result.assert_called_once_with(create_mailbox.return_value, success=True)

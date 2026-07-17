@@ -16,6 +16,42 @@ from services.register_service import RegisterService, _normalize
 
 
 class RegisterServiceGrokTest(unittest.TestCase):
+    def test_checkout_config_update_refreshes_active_retry_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = RegisterService(Path(temp_dir) / "register.json")
+            service._checkout_task_run_id = "retry-run"
+            stop_event = service._checkout_retry_stop_event
+            job = {
+                "key": "retry-run:checkout-1",
+                "run_id": "retry-run",
+                "task_id": "checkout-1",
+                "index": 1,
+                "email": "registered@example.test",
+                "access_token": "opaque-access-token",
+                "checkout": {"checkout_proxy_url": "proxy.example:1080:user:pass"},
+                "stop_event": stop_event,
+                "next_retry_monotonic": 0.0,
+                "in_flight": False,
+            }
+            service._checkout_retry_jobs[job["key"]] = job
+
+            service.update({
+                "checkout": {
+                    **service._config["checkout"],
+                    "checkout_proxy_enabled": True,
+                    "checkout_proxy_url": "socks5h://user:pass@proxy.example:1080",
+                }
+            })
+
+            self.assertEqual(
+                job["checkout"]["checkout_proxy_url"],
+                "socks5h://user:pass@proxy.example:1080",
+            )
+            self.assertEqual(
+                job["checkout"]["provider_proxy_url"],
+                "socks5h://user:pass@proxy.example:1080",
+            )
+
     def test_checkout_task_preserves_detailed_protocol_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = RegisterService(Path(temp_dir) / "register.json")
@@ -657,6 +693,40 @@ class RegisterServiceGrokTest(unittest.TestCase):
             self.assertEqual(json.loads(store_file.read_text(encoding="utf-8"))["sub2api_sync"], expected)
             self.assertEqual(RegisterService(store_file).get()["sub2api_sync"], expected)
 
+    def test_grok_oauth_delivery_targets_are_independent_and_default_off(self) -> None:
+        defaults = _normalize({"target": "grok"})["grok"]["oauth_delivery"]
+        self.assertFalse(defaults["sub2api"]["enabled"])
+        self.assertFalse(defaults["cpa"]["enabled"])
+
+        config = _normalize({
+            "target": "grok",
+            "grok": {
+                "oauth_delivery": {
+                    "sub2api": {
+                        "enabled": True,
+                        "server_id": " sub-server ",
+                        "group_mode": "custom",
+                        "group_id": "ignored",
+                        "group_name": " Grok OAuth ",
+                    },
+                    "cpa": {
+                        "enabled": False,
+                        "pool_id": " cpa-pool ",
+                    },
+                }
+            },
+        })
+
+        delivery = config["grok"]["oauth_delivery"]
+        self.assertEqual(delivery["sub2api"], {
+            "enabled": True,
+            "server_id": "sub-server",
+            "group_mode": "custom",
+            "group_id": "ignored",
+            "group_name": "Grok OAuth",
+        })
+        self.assertEqual(delivery["cpa"], {"enabled": False, "pool_id": "cpa-pool"})
+
     def test_checkout_channel_falls_back_to_upi_when_invalid(self) -> None:
         config = _normalize({"checkout": {"channel": "unsupported"}})
 
@@ -856,7 +926,7 @@ class RegisterServiceGrokTest(unittest.TestCase):
             accounts = account_store.list_accounts(redacted=False)
             self.assertEqual(protocol_calls, [accounts[0]["id"]])
             self.assertTrue(
-                any("Grok OAuth 协议授权已启动" in entry["text"] for entry in service.get()["logs"])
+                any("Grok OAuth 授权已启动" in entry["text"] for entry in service.get()["logs"])
             )
 
     def test_grok_runtime_overrides_icloud_without_mutating_saved_config(self) -> None:
@@ -1040,7 +1110,7 @@ class RegisterServiceGrokTest(unittest.TestCase):
             self.assertEqual(accounts[0]["email"], "duplicate@example.com")
             self.assertEqual(accounts[0]["status"], "active")
             self.assertTrue(
-                any("已导入 Grok 账号列表" in entry["text"] for entry in service.get()["logs"])
+                any("Grok 账号已保存" in entry["text"] for entry in service.get()["logs"])
             )
 
     def test_real_grok_worker_contract_integrates_with_service(self) -> None:

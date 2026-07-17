@@ -43,6 +43,11 @@ class OAuthAccountDeleteRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
 
 
+class OAuthAccountTestRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+    prompt: str = Field(min_length=1, max_length=1_200)
+
+
 async def require_grok_oauth_admin(
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
@@ -123,6 +128,14 @@ def create_router() -> APIRouter:
     @router.post("/accounts/{account_id}/models/sync")
     async def sync_models(account_id: str) -> dict[str, Any]:
         return await xai_cli_oauth_service.sync_models(account_id)
+
+    @router.post("/accounts/{account_id}/test")
+    async def test_account(account_id: str, body: OAuthAccountTestRequest) -> dict[str, Any]:
+        return await xai_cli_oauth_service.test_account(
+            account_id,
+            model=body.model,
+            prompt=body.prompt,
+        )
 
     @router.post("/accounts/status")
     async def set_status(body: OAuthAccountStatusRequest) -> dict[str, Any]:

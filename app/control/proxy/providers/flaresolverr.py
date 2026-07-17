@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -9,6 +11,36 @@ from urllib.parse import urlparse
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from ..models import ClearanceBundle, ClearanceMode
+
+
+_COMPOSE_FLARESOLVERR_URL = "http://flaresolverr:8191"
+_DEFAULT_HOST_FLARESOLVERR_PORT = 8191
+
+
+def _is_container_environment() -> bool:
+    override = str(os.getenv("CHATGPT2API_IN_CONTAINER") or "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _runtime_flaresolverr_url(url: str) -> str:
+    candidate = str(url or "").strip().rstrip("/")
+    if candidate.lower() != _COMPOSE_FLARESOLVERR_URL or _is_container_environment():
+        return candidate
+
+    override = str(os.getenv("CHATGPT2API_HOST_FLARESOLVERR_URL") or "").strip().rstrip("/")
+    if override:
+        return override
+    try:
+        port = int(os.getenv("FLARESOLVERR_PORT") or _DEFAULT_HOST_FLARESOLVERR_PORT)
+    except (TypeError, ValueError):
+        port = _DEFAULT_HOST_FLARESOLVERR_PORT
+    if not 1 <= port <= 65535:
+        port = _DEFAULT_HOST_FLARESOLVERR_PORT
+    return f"http://127.0.0.1:{port}"
 
 
 def _extract_all_cookies(cookies: list[dict]) -> str:
@@ -29,7 +61,7 @@ class FlareSolverrClearanceProvider:
         mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
         if mode != ClearanceMode.FLARESOLVERR:
             return None
-        fs_url      = cfg.get_str("proxy.clearance.flaresolverr_url", "")
+        fs_url      = _runtime_flaresolverr_url(cfg.get_str("proxy.clearance.flaresolverr_url", ""))
         timeout_sec = cfg.get_int("proxy.clearance.timeout_sec", 60)
         if not fs_url:
             return None

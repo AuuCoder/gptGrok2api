@@ -108,6 +108,53 @@ class PixProtocolReferenceTest(unittest.TestCase):
                 "socks5h://test-user-region-BR:test-pass@us.lajiaohttp.net:2000",
             )
 
+    def test_smartproxy_area_selector_preserves_lifetime_and_session(self) -> None:
+        proxy = (
+            "socks5h://account_area-BR_life-120_session-sessionvalue:secret"
+            "@proxy.example.test:1000"
+        )
+
+        rewritten = pix.proxy_for_country(proxy, "VN")
+
+        self.assertIn("account_area-VN_life-120_session-sessionvalue", rewritten)
+        self.assertEqual(pix.proxy_chain_key(proxy), pix.proxy_chain_key(rewritten))
+
+    def test_checkout_retries_transient_proxy_tunnel_abort_locally(self) -> None:
+        response = FakeResponse({"checkout_session_id": "cs_retry"})
+        session = MagicMock()
+        session.post.side_effect = [
+            RuntimeError("Failed to perform, curl: (56) Proxy CONNECT aborted"),
+            response,
+        ]
+
+        with patch.object(pix.time, "sleep") as sleep:
+            resolved = pix.request_with_proxy_connect_retry(
+                session,
+                "post",
+                "https://chatgpt.com/backend-api/payments/checkout",
+                stage="Checkout bootstrap",
+                attempts=3,
+            )
+
+        self.assertIs(resolved, response)
+        self.assertEqual(session.post.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_checkout_does_not_retry_non_proxy_request_error(self) -> None:
+        session = MagicMock()
+        session.post.side_effect = RuntimeError("response parse failed")
+
+        with self.assertRaisesRegex(RuntimeError, "response parse failed"):
+            pix.request_with_proxy_connect_retry(
+                session,
+                "post",
+                "https://chatgpt.com/backend-api/payments/checkout",
+                stage="Checkout bootstrap",
+                attempts=3,
+            )
+
+        session.post.assert_called_once()
+
     def test_pix_confirm_mode_supports_reference_and_legacy_switches(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(pix.pix_confirm_mode(), "inline")

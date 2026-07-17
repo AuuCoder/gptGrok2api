@@ -467,12 +467,12 @@
     >
       <template v-if="grokBatchChatTestFailureDetails.length" #details>
         <div class="space-y-2">
-          <p class="ui-field-label">非成功账号（最多 20 项）</p>
+          <p class="ui-field-label">非成功账号（封禁与登录失效优先，最多 20 项）</p>
           <ul class="max-h-56 divide-y divide-border overflow-auto">
             <li v-for="item in grokBatchChatTestFailureDetails" :key="item.id" class="py-2 first:pt-0">
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <span class="break-all font-mono text-xs text-foreground">{{ item.id }}</span>
-                <span class="text-xs text-muted-foreground">{{ grokBatchChatTestResultStatusText(item.status) }}</span>
+                <span class="text-xs font-medium" :class="grokBatchChatTestResultStatusClass(item.status)">{{ grokBatchChatTestResultStatusText(item.status) }}</span>
               </div>
               <p class="mt-1 break-words text-xs leading-5 text-muted-foreground">
                 {{ item.error || '未返回错误说明' }}
@@ -1366,6 +1366,8 @@ function normalizeGrokBatchChatTestSummary(summary: Partial<GrokAccountsBatchCha
   return {
     total: safeMetricNumber(summary?.total),
     success: safeMetricNumber(summary?.success),
+    blocked: safeMetricNumber(summary?.blocked),
+    invalid: safeMetricNumber(summary?.invalid),
     limited: safeMetricNumber(summary?.limited),
     permission: safeMetricNumber(summary?.permission),
     failed: safeMetricNumber(summary?.failed),
@@ -1374,7 +1376,7 @@ function normalizeGrokBatchChatTestSummary(summary: Partial<GrokAccountsBatchCha
 }
 
 function grokBatchChatTestSummaryText(summary: ReturnType<typeof normalizeGrokBatchChatTestSummary>) {
-  return `成功 ${summary.success}，限流 ${summary.limited}，权限 ${summary.permission}，失败 ${summary.failed}，跳过 ${summary.skipped}`
+  return `成功 ${summary.success}，封禁 ${summary.blocked}，登录失效 ${summary.invalid}，限流 ${summary.limited}，权限 ${summary.permission}，失败 ${summary.failed}，跳过 ${summary.skipped}`
 }
 
 function grokBatchChatTestJobStatusText(status: string) {
@@ -1389,11 +1391,24 @@ function grokBatchChatTestJobStatusText(status: string) {
 
 function grokBatchChatTestResultStatusText(status: string) {
   return ({
-    limited: '限流',
-    permission: '权限',
-    failed: '失败',
+    blocked: '已封禁',
+    invalid: '登录失效',
+    limited: '限流（非封禁）',
+    permission: 'Console 无权限',
+    failed: '测试失败 / 无法判断',
     skipped: '跳过',
   } as Record<string, string>)[status] || status || '未知'
+}
+
+function grokBatchChatTestResultStatusClass(status: string) {
+  return ({
+    blocked: 'text-rose-600',
+    invalid: 'text-rose-600',
+    limited: 'text-amber-600',
+    permission: 'text-sky-600',
+    failed: 'text-rose-600',
+    skipped: 'text-muted-foreground',
+  } as Record<string, string>)[status] || 'text-muted-foreground'
 }
 
 function isGrokBatchChatTestTerminal(status: string) {
@@ -1410,6 +1425,10 @@ const grokBatchChatTestCanCancel = computed(() => (
 const grokBatchChatTestFailureDetails = computed(() => (
   grokBatchChatTestProgress.results
     .filter((item) => !['success', 'pending'].includes(String(item.status || '').toLowerCase()))
+    .sort((left, right) => {
+      const priority: Record<string, number> = { blocked: 0, invalid: 1, permission: 2, failed: 3, limited: 4, skipped: 5 }
+      return (priority[String(left.status || '').toLowerCase()] ?? 9) - (priority[String(right.status || '').toLowerCase()] ?? 9)
+    })
     .slice(0, 20)
 ))
 

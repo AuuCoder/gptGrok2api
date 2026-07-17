@@ -19,6 +19,10 @@ from services.proxy_service import normalize_proxy_url_list
 from services.register import mail_provider, openai_register
 from services.register.grok_account_store import grok_account_store
 from services.sub2api_service import normalize_sync_config
+from services.xai_oauth_delivery_service import (
+    DEFAULT_XAI_OAUTH_DELIVERY_CONFIG,
+    normalize_xai_oauth_delivery_config,
+)
 from services.xai_cli_oauth_store import xai_cli_oauth_store
 
 
@@ -45,6 +49,7 @@ DEFAULT_GROK_CONFIG = {
     "result_path": "/getTaskResult",
     "custom_headers": {},
     "xai_cli_oauth_enabled": True,
+    "oauth_delivery": DEFAULT_XAI_OAUTH_DELIVERY_CONFIG,
     "grok2api_enabled": True,
     "grok2api_api_base": "",
     "grok2api_admin_key": "",
@@ -75,7 +80,7 @@ class GrokAccountChatTestError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.category = category if category in {"limited", "permission", "failed"} else "failed"
+        self.category = category if category in {"blocked", "invalid", "limited", "permission", "failed"} else "failed"
 
 
 def _serialize_outlook_pool(credentials: list[dict]) -> str:
@@ -148,6 +153,13 @@ def _token_preview(value: object) -> str:
     if len(token) <= 12:
         return "********"
     return f"{token[:6]}...{token[-4:]}"
+
+
+def _runtime_result_key(value: object) -> str:
+    token = _normalize_bridge_sso(value)
+    if len(token) > 20:
+        return f"{token[:8]}...{token[-8:]}"
+    return token
 
 
 def _quota_brief(value: object) -> dict[str, dict[str, int]]:
@@ -408,6 +420,7 @@ def _normalize(raw: dict) -> dict:
     grok2api_pool = grok["grok2api_pool"].lower() or "auto"
     grok["grok2api_pool"] = grok2api_pool if grok2api_pool in {"auto", "basic", "super", "heavy"} else "auto"
     grok["xai_cli_oauth_enabled"] = _safe_bool(grok.get("xai_cli_oauth_enabled"), True)
+    grok["oauth_delivery"] = normalize_xai_oauth_delivery_config(grok_source.get("oauth_delivery"))
     grok["grok2api_enabled"] = True
     grok["grok2api_api_base"] = ""
     grok["grok2api_admin_key"] = ""
@@ -691,11 +704,27 @@ class RegisterService:
         with self._lock:
             self._merge_outlook_pools(updates)
             self._config = _normalize({**self._config, **updates})
+            if isinstance(updates.get("checkout"), dict):
+                self._refresh_checkout_retry_configs_locked()
             self._drop_mail_proxy()
             self._sync_icloud_claims()
             self._sync_backend_config()
             self._save()
             return self.get()
+
+    def _refresh_checkout_retry_configs_locked(self) -> None:
+        """Apply saved Checkout changes to queued jobs on their next attempt."""
+        checkout = self._config.get("checkout") if isinstance(self._config.get("checkout"), dict) else {}
+        snapshot = json.loads(json.dumps(checkout, ensure_ascii=False))
+        changed = False
+        for job in self._checkout_retry_jobs.values():
+            if job.get("stop_event") is not self._checkout_retry_stop_event:
+                continue
+            job["checkout"] = json.loads(json.dumps(snapshot, ensure_ascii=False))
+            job["channel"] = _checkout_channel(snapshot.get("channel"))
+            changed = True
+        if changed:
+            self._checkout_retry_condition.notify_all()
 
     def start(self) -> dict:
         with self._lock:
@@ -723,11 +752,17 @@ class RegisterService:
                 daemon=True,
                 name=f"{target}-register",
             )
+            if target == "grok":
+                self._append_log(
+                    f"Grok 注册任务已启动：共 {self._config['total']} 个，并发 {self._config['threads']}",
+                    "yellow",
+                )
+            else:
+                self._append_log(
+                    f"注册任务启动，平台={target}，模式={self._config['mode']}，线程数={self._config['threads']}",
+                    "yellow",
+                )
             self._runner.start()
-            self._append_log(
-                f"注册任务启动，平台={target}，模式={self._config['mode']}，线程数={self._config['threads']}",
-                "yellow",
-            )
             return self.get()
 
     def stop(self) -> dict:
@@ -976,6 +1011,8 @@ class RegisterService:
         status_filter = _clean_text(status).lower()
         if not status_filter or status_filter == "all":
             return True
+        if status_filter == "refresh_failed":
+            return _clean_text(item.get("refresh_status")).lower() == "failed"
         runtime_aliases = {
             "normal": "active",
             "limited": "cooling",
@@ -1050,6 +1087,9 @@ class RegisterService:
                 "tags": [_clean_text(value) for value in cached_runtime.get("tags", []) if _clean_text(value)]
                 if isinstance(cached_runtime.get("tags"), list)
                 else [],
+                "refresh_status": _clean_text(cached_runtime.get("refresh_status")).lower(),
+                "refresh_at": cached_runtime.get("refresh_at"),
+                "refresh_error": _clean_text(cached_runtime.get("refresh_error"))[:300],
                 "sync_state": (
                     "not_ready"
                     if not token
@@ -1071,6 +1111,9 @@ class RegisterService:
                         "tags": [_clean_text(value) for value in remote.get("tags", []) if _clean_text(value)]
                         if isinstance(remote.get("tags"), list)
                         else [],
+                        "refresh_status": _clean_text(remote.get("refresh_status")).lower(),
+                        "refresh_at": remote.get("refresh_at"),
+                        "refresh_error": _clean_text(remote.get("refresh_error"))[:300],
                         "sync_state": "synced",
                     }
                 )
@@ -1110,6 +1153,9 @@ class RegisterService:
             "runtime_status": runtime_status,
             "calls_total": calls_total,
             "quota": quota_summary,
+            "refresh_failed": sum(
+                1 for item in merged_items if _clean_text(item.get("refresh_status")).lower() == "failed"
+            ),
         }
         filtered = [
             item
@@ -1194,7 +1240,7 @@ class RegisterService:
                 reset_text = f"预计恢复时间：{reset_time.strftime('%Y-%m-%d %H:%M')}。"
             raise GrokAccountChatTestError(
                 f"该账号的 Console 对话额度已耗尽（0 / {console_total}）。"
-                f"{reset_text}请刷新状态和额度，或选择 Console 额度大于 0 的账号。",
+                f"{reset_text}这是额度限流，不是账号封禁。请刷新状态和额度，或选择 Console 额度大于 0 的账号。",
                 status_code=409,
                 category="limited",
             )
@@ -1210,22 +1256,37 @@ class RegisterService:
         except GrokAccountChatTestError:
             raise
         except Exception as error:
+            from app.dataplane.reverse.protocol.xai_usage import invalid_credentials_error_kind
+
             upstream_status = _safe_int(getattr(error, "status", 0))
+            credential_kind = invalid_credentials_error_kind(error)
+            if credential_kind == "blocked":
+                raise GrokAccountChatTestError(
+                    "上游明确返回账号已封禁、暂停或邮箱域名被拒绝",
+                    status_code=403,
+                    category="blocked",
+                ) from error
+            if credential_kind == "invalid":
+                raise GrokAccountChatTestError(
+                    "SSO 登录态已失效或被撤销，需要重新登录后再测",
+                    status_code=401,
+                    category="invalid",
+                ) from error
             if upstream_status == 403:
                 raise GrokAccountChatTestError(
-                    "Console 权限被拒绝，请登录 console.x.ai 检查账号权限",
+                    "Console 权限被拒绝；没有收到封禁标记，不能据此判断账号被封",
                     status_code=403,
                     category="permission",
                 ) from error
             if upstream_status == 401:
                 raise GrokAccountChatTestError(
-                    "Console 登录请求被拒绝，未确认 SSO 登录态是否失效",
+                    "Console 登录请求被拒绝，但上游未返回封禁或登录态失效标记，暂时无法确认",
                     status_code=401,
                     category="permission",
                 ) from error
             if upstream_status == 429:
                 raise GrokAccountChatTestError(
-                    "Console 对话测试触发限流",
+                    "Console 对话测试触发限流；这是额度或频率限制，不是封禁标记",
                     status_code=429,
                     category="limited",
                 ) from error
@@ -1251,6 +1312,8 @@ class RegisterService:
         return {
             "total": len(results),
             "success": sum(1 for item in results if item.get("status") == "success"),
+            "blocked": sum(1 for item in results if item.get("status") == "blocked"),
+            "invalid": sum(1 for item in results if item.get("status") == "invalid"),
             "limited": sum(1 for item in results if item.get("status") == "limited"),
             "permission": sum(1 for item in results if item.get("status") == "permission"),
             "failed": sum(1 for item in results if item.get("status") == "failed"),
@@ -1488,17 +1551,65 @@ class RegisterService:
     def refresh_grok_accounts_runtime(self, ids: list[str]) -> dict[str, Any]:
         ordered_ids = list(dict.fromkeys(_clean_text(value) for value in ids if _clean_text(value)))
         raw_items = grok_account_store.get_accounts_by_ids(ordered_ids)
-        tokens = [_normalize_bridge_sso(item.get("sso")) for item in raw_items]
-        valid_tokens = list(dict.fromkeys(token for token in tokens if token))
-        missing = len(ordered_ids) - len(valid_tokens)
+        by_id = {_clean_text(item.get("id")): item for item in raw_items}
+        account_tokens = [
+            (account_id, _normalize_bridge_sso(by_id.get(account_id, {}).get("sso")))
+            for account_id in ordered_ids
+        ]
+        valid_tokens = list(dict.fromkeys(token for _account_id, token in account_tokens if token))
+        missing = sum(1 for _account_id, token in account_tokens if not token)
         if not valid_tokens:
-            return {"summary": {"total": len(ordered_ids), "ok": 0, "fail": len(ordered_ids)}}
+            return {
+                "summary": {"total": len(ordered_ids), "ok": 0, "fail": len(ordered_ids)},
+                "results": [
+                    {
+                        "id": account_id,
+                        "ok": False,
+                        "refresh_status": "failed",
+                        "error": "账号未保存 SSO 登录态",
+                    }
+                    for account_id, _token in account_tokens
+                ],
+            }
         try:
             result = self._grok2api_client().refresh(valid_tokens)
             summary = _batch_summary(result, len(valid_tokens))
             summary["total"] += missing
             summary["fail"] += missing
-            return {"summary": summary}
+            source_results = result.get("results") if isinstance(result, dict) else {}
+            source_results = source_results if isinstance(source_results, dict) else {}
+            results: list[dict[str, Any]] = []
+            for account_id, token in account_tokens:
+                if not token:
+                    results.append(
+                        {
+                            "id": account_id,
+                            "ok": False,
+                            "refresh_status": "failed",
+                            "error": "账号未保存 SSO 登录态",
+                        }
+                    )
+                    continue
+                detail = source_results.get(_runtime_result_key(token))
+                detail = detail if isinstance(detail, dict) else {}
+                error = _clean_text(detail.get("error"))
+                if detail:
+                    ok = not error
+                elif not source_results and summary["total"] == 1:
+                    ok = summary["ok"] == 1 and summary["fail"] == 0
+                    if not ok:
+                        error = "上游未返回真实额度数据"
+                else:
+                    ok = False
+                results.append(
+                    {
+                        "id": account_id,
+                        "ok": ok,
+                        "refresh_status": "success" if ok else "failed",
+                        "error": error or ("运行时未返回刷新结果" if not detail and not ok else ""),
+                    }
+                )
+            return {"summary": summary, "results": results}
         except Exception as error:
             return {
                 "summary": {"total": len(ordered_ids), "ok": 0, "fail": len(ordered_ids)},
@@ -1660,12 +1771,8 @@ class RegisterService:
         email = str(item.get("email") or "")
         status = str(item.get("status") or "active")
         if status == "active":
-            operation = "新增" if bool(saved.get("added")) else "更新"
-            self._append_log(
-                f"已导入 Grok 账号列表: {self._mask_email(email)}（{operation}）",
-                "green",
-            )
             config = self._grok_config_snapshot()
+            runtime_synced = False
             if _safe_bool(config.get("grok2api_enabled"), False):
                 token = _normalize_bridge_sso(item.get("sso"))
                 try:
@@ -1677,14 +1784,10 @@ class RegisterService:
                         "red",
                     )
                 else:
-                    self._append_log(
-                        f"已导入内置 Grok 账号池: {self._mask_email(email)}",
-                        "green",
-                    )
-        else:
+                    runtime_synced = True
             self._append_log(
-                f"Grok 账号凭据已暂存: {self._mask_email(email)}（状态={status}）",
-                "yellow",
+                f"Grok 账号已保存{'并加入账号池' if runtime_synced else ''}：{self._mask_email(email)}",
+                "green",
             )
         return saved
 
@@ -1714,8 +1817,6 @@ class RegisterService:
             return
         try:
             started = self._grok_oauth_protocol_sink(account_id)
-            job = started.get("job") if isinstance(started.get("job"), dict) else {}
-            job_id = _clean_text(job.get("id"))
         except Exception as error:
             self._append_log(
                 f"Grok OAuth 协议授权启动失败: {self._mask_email(email)}，原因: {self._grok2api_error_text(error)}",
@@ -1723,9 +1824,8 @@ class RegisterService:
             )
             return
         state = "已接入" if bool(started.get("reused")) else "已启动"
-        suffix = f"（任务={job_id}）" if job_id else ""
         self._append_log(
-            f"Grok OAuth 协议授权{state}: {self._mask_email(email)}{suffix}",
+            f"Grok OAuth 授权{state}：{self._mask_email(email)}",
             "yellow",
         )
 
@@ -2363,7 +2463,10 @@ class RegisterService:
         with self._lock:
             self._config["enabled"] = False
             self._save()
-        self._append_log(f"注册任务结束，平台={target}，成功{success}，失败{fail}", "yellow")
+        if target == "grok":
+            self._append_log(f"Grok 注册任务已结束：成功 {success}，失败 {fail}", "yellow")
+        else:
+            self._append_log(f"注册任务结束，平台={target}，成功{success}，失败{fail}", "yellow")
         if target == "grok" and hasattr(backend, "account_result_sink"):
             backend.account_result_sink = None
 

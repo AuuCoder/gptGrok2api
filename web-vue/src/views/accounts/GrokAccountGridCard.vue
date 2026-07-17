@@ -31,6 +31,7 @@
       <StatusPill
         :label="grokRuntimeStatusText(item)"
         :tone-class="`${grokRuntimeStatusClass(item)} border-border`"
+        :title="grokRefreshStatusTitle(item)"
       />
       <StatusPill :label="grokSyncStateText(item)" tone-class="border-muted bg-muted/20 text-muted-foreground" />
       <StatusPill
@@ -87,6 +88,7 @@ import {
   grokAccountTokenPreview,
   grokOAuthStatusClass,
   grokOAuthStatusText,
+  grokRefreshStatusTitle,
   grokRuntimeStatusClass,
   grokRuntimeStatusText,
   grokSyncStateText,

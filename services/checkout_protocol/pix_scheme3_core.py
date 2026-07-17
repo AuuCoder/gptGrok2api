@@ -135,6 +135,13 @@ AU_BILLING_STREETS = [
     ("18 Elizabeth Street", "Hobart", "Tasmania", "7000"),
 ]
 
+BR_BILLING_NAMES = [
+    ("Gabriel", "Almeida"),
+    ("Lucas", "Oliveira"),
+    ("Mariana", "Santos"),
+    ("Beatriz", "Costa"),
+]
+
 EXTRA_BILLING_NAMES = [("Alex", "Tan"), ("Daniel", "Lee"), ("Emma", "Wong"), ("Mia", "Chen"), ("Noah", "Martin"), ("Olivia", "Nguyen")]
 
 EXTRA_BILLING_STREETS = {
@@ -504,7 +511,10 @@ def opll_random_postal_code(pattern: str) -> str:
 
 def opll_billing_for_country(country: str) -> dict:
     country = normalize_opll_country(country)
-    if country == "DE":
+    if country == "BR":
+        first, last = random.choice(BR_BILLING_NAMES)
+        line1, city, state, postal = random.choice(EXTRA_BILLING_STREETS["BR"])
+    elif country == "DE":
         first, last = random.choice(DE_BILLING_NAMES)
         line1, city, state, postal = random.choice(DE_BILLING_STREETS)
     elif country == "GB":

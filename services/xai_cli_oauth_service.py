@@ -287,6 +287,7 @@ class XaiCliOAuthService:
                 "updated_at",
                 "account",
                 "models",
+                "delivery",
             )
             if key in job
         }
@@ -413,6 +414,7 @@ class XaiCliOAuthService:
     async def _run_protocol_authorization(self, job_id: str, source: dict[str, Any]) -> None:
         from services.register_service import register_service
         from services.xai_device_oauth_protocol import XaiDeviceOAuthProtocol
+        from services.xai_oauth_delivery_service import deliver_xai_oauth_account
 
         self._update_protocol_job(job_id, status="running", stage="bootstrap", message="发现当前 Castle SDK 和登录参数")
         runtime = register_service.get()
@@ -439,14 +441,47 @@ class XaiCliOAuthService:
                 source_type="registered_account_protocol",
                 proxy="" if proxy == "direct" else proxy,
             )
+            account_id = _clean_text((imported.get("account") or {}).get("id"))
+            stored_account = self.store.get(account_id) if account_id else None
+            delivery: dict[str, Any] = {}
+            if isinstance(stored_account, dict):
+                self._update_protocol_job(job_id, stage="delivery", message="按配置投递 OAuth 凭据")
+                try:
+                    delivery = await asyncio.to_thread(
+                        deliver_xai_oauth_account,
+                        stored_account,
+                        grok_config.get("oauth_delivery"),
+                    )
+                except Exception as exc:
+                    delivery_error = _clean_text(exc) or type(exc).__name__
+                    for key in ("access_token", "refresh_token", "id_token", "email", "subject"):
+                        secret = _clean_text(stored_account.get(key))
+                        if secret:
+                            delivery_error = delivery_error.replace(secret, "[redacted]")
+                    delivery = {
+                        "system": {
+                            "status": "failed",
+                            "target_id": "",
+                            "at": datetime.now(timezone.utc).isoformat(),
+                            "error": delivery_error[:500],
+                        }
+                    }
+                updated_account = self.store.update_metadata(account_id, {"oauth_delivery": delivery})
+                if updated_account is not None:
+                    imported["account"] = updated_account
+            delivery_failed = any(
+                isinstance(item, dict) and item.get("status") == "failed"
+                for item in delivery.values()
+            )
             self._update_protocol_job(
                 job_id,
                 status="authorized",
                 stage="completed",
-                message="协议授权完成",
+                message="协议授权完成，外部投递部分失败" if delivery_failed else "协议授权完成",
                 error="",
                 account=imported.get("account"),
                 models=imported.get("models") if isinstance(imported.get("models"), list) else [],
+                delivery=delivery,
             )
         except Exception as exc:
             error = _clean_text(exc) or type(exc).__name__
@@ -629,6 +664,65 @@ class XaiCliOAuthService:
         records = self.store.list_accounts(redacted=True)
         redacted = next((item for item in records if _clean_text(item.get("id")) == _clean_text(refreshed.get("id"))), None)
         return {"account": redacted}
+
+    async def test_account(self, account_id: str, *, model: str, prompt: str) -> dict[str, Any]:
+        """Run one non-streaming probe through exactly the requested OAuth account."""
+        model_id = _clean_text(model)
+        prompt_text = _clean_text(prompt)
+        if model_id != GROK_45_MODEL_ID:
+            raise ValidationError(f"Unsupported xAI CLI OAuth model: {model_id!r}", param="model", code="model_not_found")
+        if not prompt_text:
+            raise ValidationError("prompt is required", param="prompt")
+
+        account = self._get_account(account_id)
+        account_id = _clean_text(account.get("id"))
+        started_at = time.monotonic()
+        failure_recorded = False
+        try:
+            account = await self._ensure_access_token(account)
+            payload = {
+                "model": model_id,
+                "input": chat_messages_to_response_input([{"role": "user", "content": prompt_text}]),
+                "stream": False,
+                "max_output_tokens": 128,
+            }
+            response = await self._post_response(account, payload)
+            if response.status_code in {401, 403}:
+                account = await self._ensure_access_token(account, force_refresh=True)
+                response = await self._post_response(account, payload)
+            if response.status_code >= 400:
+                self._mark_response_failure(account, response)
+                error = f"HTTP {response.status_code}: {_safe_error_body(response)}"
+                self.store.record_result(account_id, False, error)
+                failure_recorded = True
+                raise UpstreamError(
+                    "xAI CLI account test failed",
+                    status=response.status_code,
+                    body=_safe_error_body(response),
+                )
+
+            data = self._json_body(response)
+            completion = response_to_chat_completion(data, model=model_id)
+            choices = completion.get("choices") if isinstance(completion.get("choices"), list) else []
+            message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+            content = _clean_text(message.get("content") if isinstance(message, dict) else "")
+            if not content:
+                raise UpstreamError("xAI CLI account test returned no text", status=502)
+
+            self.store.record_result(account_id, True)
+            if _clean_text(account.get("status")).lower() not in {"active", "disabled"}:
+                self.store.set_status([account_id], "active")
+            return {
+                "account_id": account_id,
+                "account": self.store.get(account_id, redacted=True),
+                "model": model_id,
+                "content": content,
+                "elapsed_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+            }
+        except Exception as exc:
+            if not failure_recorded:
+                self.store.record_result(account_id, False, _clean_text(exc) or type(exc).__name__)
+            raise
 
     async def create_response(
         self,

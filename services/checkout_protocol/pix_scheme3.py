@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -27,6 +29,8 @@ PIX_REQUIRE_ZERO = str(os.environ.get("PIX_REQUIRE_ZERO", "0")).strip().lower() 
 PIX_REBUILD_ATTEMPTS = max(1, int(os.environ.get("PIX_REBUILD_ATTEMPTS", "5") or "5"))
 PIX_POLL_TIMEOUT_SECONDS = max(10, int(os.environ.get("PIX_POLL_TIMEOUT_SECONDS", "45") or "45"))
 PIX_FOLLOW_REDIRECT = str(os.environ.get("PIX_FOLLOW_REDIRECT", "1")).strip().lower() not in {"0", "false", "off", "no"}
+PIX_DUMP_DIR = Path(__file__).resolve().parent / "dumps"
+PIX_ACCOUNTS_PATH = Path(__file__).resolve().parents[2] / "data" / "accounts.json"
 
 
 def _log(log_cb: LogCb, message: str) -> None:
@@ -47,7 +51,11 @@ def proxy_for_region(proxy: str, region: str) -> str:
 
     parsed = urlsplit(proxy)
     username = unquote(parsed.username or "")
-    rewritten = re.sub(r"(?i)region-[A-Za-z]{2}", f"region-{region}", username)
+    rewritten = re.sub(
+        r"(?i)(?P<selector>region|area)-[A-Za-z]{2}",
+        lambda match: f"{match.group('selector')}-{region}",
+        username,
+    )
     if rewritten == username:
         return proxy
 
@@ -325,6 +333,118 @@ def generate_valid_cpf() -> str:
     return "".join(str(n) for n in nums)
 
 
+def is_valid_cpf(value: str) -> bool:
+    digits = [int(char) for char in re.sub(r"\D", "", str(value or ""))]
+    if len(digits) != 11 or len(set(digits)) == 1:
+        return False
+    first = (sum(number * weight for number, weight in zip(digits[:9], range(10, 1, -1))) * 10) % 11
+    first = 0 if first == 10 else first
+    second_digits = digits[:9] + [first]
+    second = (sum(number * weight for number, weight in zip(second_digits, range(11, 1, -1))) * 10) % 11
+    second = 0 if second == 10 else second
+    return digits[-2:] == [first, second]
+
+
+def _dump_request_body(text: str) -> dict[str, Any]:
+    marker = "request_body:"
+    start = text.find(marker)
+    if start < 0:
+        return {}
+    object_start = text.find("{", start + len(marker))
+    if object_start < 0:
+        return {}
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text[object_start:])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_approved_pix_billing_profile(
+    dump_dir: Path | None = None,
+    accounts_path: Path | None = None,
+) -> dict[str, str]:
+    root = dump_dir or PIX_DUMP_DIR
+    if not root.is_dir():
+        return {}
+
+    try:
+        accounts = json.loads((accounts_path or PIX_ACCOUNTS_PATH).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    ready_sessions = {
+        str(account.get("checkout_session_id") or "")
+        for account in accounts
+        if isinstance(account, dict)
+        and account.get("checkout_link_status") == "ready"
+        and account.get("checkout_session_id")
+    }
+    if not ready_sessions:
+        return {}
+
+    approved_sessions: set[str] = set()
+    for path in root.glob("*_approve.txt"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if not re.search(r'"result"\s*:\s*"approved"', text):
+            continue
+        match = re.search(r'"checkout_session_id"\s*:\s*"(cs_[^"]+)"', text)
+        if match and match.group(1) in ready_sessions:
+            approved_sessions.add(match.group(1))
+
+    for path in sorted(root.glob("*_pix_confirm.txt"), reverse=True):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        session_match = re.search(r"payment_pages/(cs_[^/]+)/confirm", text)
+        if not session_match or session_match.group(1) not in approved_sessions:
+            continue
+        body = _dump_request_body(text)
+        address = {
+            "country": str(body.get("payment_method_data[billing_details][address][country]") or "BR"),
+            "line1": str(body.get("payment_method_data[billing_details][address][line1]") or ""),
+            "line2": str(body.get("payment_method_data[billing_details][address][line2]") or ""),
+            "city": str(body.get("payment_method_data[billing_details][address][city]") or ""),
+            "state": str(body.get("payment_method_data[billing_details][address][state]") or ""),
+            "postal_code": str(body.get("payment_method_data[billing_details][address][postal_code]") or ""),
+        }
+        tax_id = str(body.get("payment_method_data[billing_details][tax_id]") or "")
+        name = str(body.get("payment_method_data[billing_details][name]") or "")
+        if not name or not is_valid_cpf(tax_id) or not all(address[key] for key in ("line1", "city", "state", "postal_code")):
+            continue
+        return {
+            "name": name,
+            "email": str(body.get("payment_method_data[billing_details][email]") or ""),
+            "phone": str(body.get("payment_method_data[billing_details][phone]") or ""),
+            "tax_id": re.sub(r"\D", "", tax_id),
+            **address,
+        }
+    return {}
+
+
+def pix_billing_snapshot(billing: dict[str, str]) -> dict[str, Any]:
+    digits = re.sub(r"\D", "", str(billing.get("tax_id") or ""))
+    formatted_tax_id = digits
+    if len(digits) == 11:
+        formatted_tax_id = f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
+    return {
+        "checkout_billing_name": str(billing.get("name") or ""),
+        "checkout_billing_email": str(billing.get("email") or ""),
+        "checkout_billing_address": {
+            "country": str(billing.get("country") or "BR"),
+            "line1": str(billing.get("line1") or ""),
+            "line2": str(billing.get("line2") or ""),
+            "city": str(billing.get("city") or ""),
+            "state": str(billing.get("state") or ""),
+            "postal_code": str(billing.get("postal_code") or ""),
+        },
+        "checkout_billing_tax_id": formatted_tax_id,
+    }
+
+
 def stripe_create_pix_method(
     stripe: requests.Session,
     cs_id: str,
@@ -577,8 +697,12 @@ def run_pix_provider_attempt(
         f"{PIX_PROMOTION_COUNTRY} promotion={promotion_proxy or 'direct'}",
     )
 
-    billing = core.opll_billing_for_country(PIX_PROVIDER_COUNTRY)
-    billing["tax_id"] = generate_valid_cpf()
+    billing = load_approved_pix_billing_profile()
+    if billing:
+        _log(log_cb, "[PIX] reuse billing profile from an approved historical checkout")
+    else:
+        billing = core.opll_billing_for_country(PIX_PROVIDER_COUNTRY)
+    billing["tax_id"] = str(billing.get("tax_id") or generate_valid_cpf())
     if not billing.get("state"):
         billing["state"] = "SP"
     _log(log_cb, f"[PIX] BR checkout create (no initial promo)… cpf={billing['tax_id'][:3]}***")
@@ -708,6 +832,7 @@ def run_pix_provider_attempt(
     _log(log_cb, f"[PIX] success source={details.get('source')} long_url={long_url[:180]}")
     return {
         **checkout,
+        **pix_billing_snapshot(billing),
         "payment_method_country": PIX_PROVIDER_COUNTRY,
         "payment_method_id": pm_id,
         "stripe_hosted_url": stripe_hosted_url,

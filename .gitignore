@@ -39,6 +39,7 @@ git_cache/
 *.log
 /runtime/
 services/checkout_protocol/proxy_state.json
+services/checkout_protocol/dumps/
 loginwithpassword_*/
 logwithemailverifycode_*/
 test_batch_output/
@@ -50,4 +51,6 @@ test/
 tests/
 docs/*.md
 scripts/test_*.py
+scripts/probe_*.py
+scripts/pix_browser_capture.py
 /web/

@@ -215,9 +215,18 @@
               variant="outline"
               v-if="authStore.isAdmin"
               @click="openUpdateDialog"
-              title="查看版本更新"
+              :title="versionButtonTitle"
             >
-              {{ versionButtonText }}
+              <span class="inline-flex items-center gap-1.5">
+                <span
+                  v-if="versionIndicatorVisible"
+                  class="h-2 w-2 shrink-0 rounded-full"
+                  :class="versionIndicatorClass"
+                  aria-hidden="true"
+                />
+                <span>{{ versionButtonText }}</span>
+                <span v-if="versionIndicatorVisible" class="sr-only">，{{ versionIndicatorLabel }}</span>
+              </span>
             </Button>
             <Button
               size="sm"
@@ -780,6 +789,22 @@ const updateCheckStatus = computed(() => {
   if (hasNewVersion.value || updateCheckMessage.value.includes('发现新版本')) return 'available'
   return 'current'
 })
+const versionIndicatorVisible = computed(() => ['available', 'current'].includes(updateCheckStatus.value))
+const versionIndicatorClass = computed(() => {
+  if (updateCheckStatus.value === 'available') {
+    return 'bg-amber-400 ring-2 ring-amber-400/20 motion-safe:animate-pulse'
+  }
+  return 'bg-emerald-500 ring-2 ring-emerald-500/15'
+})
+const versionIndicatorLabel = computed(() => (
+  updateCheckStatus.value === 'available' ? '有新版本' : '已是最新版'
+))
+const versionButtonTitle = computed(() => {
+  if (updateCheckStatus.value === 'checking') return '正在检查版本更新'
+  if (updateCheckStatus.value === 'error') return '版本检查失败，点击重试'
+  if (versionIndicatorVisible.value) return `查看版本更新：${versionIndicatorLabel.value}`
+  return '查看版本更新'
+})
 const updateCheckMessageClass = computed(() => {
   if (updateCheckStatus.value === 'available') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
   if (updateCheckStatus.value === 'checking') return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
@@ -1017,6 +1042,13 @@ async function loadCurrentVersion() {
   }
 }
 
+async function initializeVersionStatus() {
+  await loadCurrentVersion()
+  if (authStore.isAdmin) {
+    await checkForUpdates(false)
+  }
+}
+
 function handleSystemThemeChange() {
   if (themeMode.value === 'system') {
     applyThemeMode(themeMode.value)
@@ -1101,7 +1133,7 @@ onMounted(() => {
   applyThemeMode(themeMode.value)
   setupSystemThemeListener()
   setupRoutePendingGuards()
-  void loadCurrentVersion()
+  void initializeVersionStatus()
   void loadThirdPartyApps()
 })
 

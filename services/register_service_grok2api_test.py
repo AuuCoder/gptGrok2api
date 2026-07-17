@@ -188,6 +188,8 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             success = store.upsert({"email": "success@example.com", "sso": "success-sso", "status": "active"})
             limited = store.upsert({"email": "limited@example.com", "sso": "limited-sso", "status": "active"})
             upstream_limited = store.upsert({"email": "upstream-limited@example.com", "sso": "upstream-limited-sso", "status": "active"})
+            blocked = store.upsert({"email": "blocked@example.com", "sso": "blocked-sso", "status": "active"})
+            invalid = store.upsert({"email": "invalid@example.com", "sso": "invalid-sso", "status": "active"})
             permission = store.upsert({"email": "permission@example.com", "sso": "permission-sso", "status": "active"})
             failed = store.upsert({"email": "failed@example.com", "sso": "failed-sso", "status": "active"})
             after_failed = store.upsert({"email": "after-failed@example.com", "sso": "after-failed-sso", "status": "active"})
@@ -217,6 +219,10 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                     return {"model": "grok-4.3-console", "content": "pong", "elapsed_ms": 8}
                 if token == "upstream-limited-sso":
                     raise UpstreamError("Console API returned 429 upstream-limited-sso", status=429)
+                if token == "blocked-sso":
+                    raise UpstreamError("Console API returned 403 blocked-sso", status=403, body="account suspended blocked-sso")
+                if token == "invalid-sso":
+                    raise UpstreamError("Console API returned 401 invalid-sso", status=401, body="session not found invalid-sso")
                 if token == "permission-sso":
                     raise UpstreamError("Console API returned 403 permission-sso", status=403, body="permission-denied")
                 raise RuntimeError(f"unexpected {token}")
@@ -237,24 +243,38 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(
                 result["summary"],
-                {"total": 7, "success": 2, "limited": 2, "permission": 1, "failed": 1, "skipped": 1, "pending": 0},
+                {
+                    "total": 9,
+                    "success": 2,
+                    "blocked": 1,
+                    "invalid": 1,
+                    "limited": 2,
+                    "permission": 1,
+                    "failed": 1,
+                    "skipped": 1,
+                    "pending": 0,
+                },
             )
             by_id = {item["id"]: item for item in result["results"]}
             self.assertEqual(by_id[success["item"]["id"]]["status"], "success")
             self.assertEqual(by_id[limited["item"]["id"]]["status"], "limited")
             self.assertEqual(by_id[upstream_limited["item"]["id"]]["status"], "limited")
+            self.assertEqual(by_id[blocked["item"]["id"]]["status"], "blocked")
+            self.assertEqual(by_id[invalid["item"]["id"]]["status"], "invalid")
             self.assertEqual(by_id[permission["item"]["id"]]["status"], "permission")
             self.assertEqual(by_id[failed["item"]["id"]]["status"], "failed")
             self.assertEqual(by_id[after_failed["item"]["id"]]["status"], "success")
             self.assertEqual(by_id[skipped["item"]["id"]]["status"], "skipped")
             self.assertEqual(by_id[success["item"]["id"]]["elapsed_ms"], 8)
             self.assertEqual(by_id[limited["item"]["id"]]["elapsed_ms"], 0)
-            self.assertEqual(client.chat_test.call_count, 5)
+            self.assertEqual(client.chat_test.call_count, 7)
             encoded = json.dumps(result, ensure_ascii=False)
             for secret in (
                 "success-sso",
                 "limited-sso",
                 "upstream-limited-sso",
+                "blocked-sso",
+                "invalid-sso",
                 "permission-sso",
                 "failed-sso",
                 "after-failed-sso",
@@ -306,6 +326,8 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             self.assertEqual(result["summary"], {
                 "total": 3,
                 "success": 1,
+                "blocked": 0,
+                "invalid": 0,
                 "limited": 0,
                 "permission": 0,
                 "failed": 0,
@@ -343,7 +365,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             self.assertEqual(client.refresh.call_count, 2)
             client.add.assert_called_with(["raw-sso-token"])
             client.refresh.assert_called_with(["raw-sso-token"])
-            self.assertTrue(any("已导入内置 Grok 账号池" in item["text"] for item in service.get()["logs"]))
+            self.assertTrue(any("Grok 账号已保存并加入账号池" in item["text"] for item in service.get()["logs"]))
 
     def test_auto_import_refresh_failure_does_not_change_local_active_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -410,6 +432,9 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                         "fail_count": 2,
                         "last_used_at": 123456,
                         "tags": ["nsfw"],
+                        "refresh_status": "failed",
+                        "refresh_at": 123460,
+                        "refresh_error": "上游未返回真实额度数据",
                     },
                     {
                         "token": "remote-only-token",
@@ -429,6 +454,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                 view = service.grok_accounts_view()
                 active_filter = service.grok_accounts_view(status="active")
                 normal_filter = service.grok_accounts_view(status="normal")
+                refresh_failed_filter = service.grok_accounts_view(status="refresh_failed")
 
             encoded = json.dumps(view, ensure_ascii=False)
             self.assertNotIn("runtime-secret-token", encoded)
@@ -445,6 +471,9 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             )
             self.assertEqual(merged["use_count"], 11)
             self.assertEqual(merged["tags"], ["nsfw"])
+            self.assertEqual(merged["refresh_status"], "failed")
+            self.assertEqual(merged["refresh_at"], 123460)
+            self.assertEqual(merged["refresh_error"], "上游未返回真实额度数据")
             runtime_only = next(item for item in view["items"] if item["source_type"] == "runtime")
             self.assertEqual(runtime_only["email"], "")
             self.assertFalse(runtime_only["has_password"])
@@ -458,6 +487,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
 
             self.assertEqual(len(active_filter["items"]), 2)
             self.assertEqual(normal_filter["items"], [])
+            self.assertEqual([item["id"] for item in refresh_failed_filter["items"]], [active["item"]["id"]])
 
     def test_runtime_view_attaches_redacted_oauth_metadata_by_email(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

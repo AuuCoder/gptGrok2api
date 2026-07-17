@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from services.register.grok2api_account_client import (
     Grok2APIAccountClient,
@@ -142,6 +143,25 @@ class Grok2APIAccountClientTest(unittest.TestCase):
         try:
             self.assertFalse(client._session.trust_env)
             self.assertEqual(client.pool, "auto")
+        finally:
+            client._session.close()
+
+    def test_embedded_refresh_extends_timeout_for_large_batches(self) -> None:
+        runtime = MagicMock(available=True)
+        runtime.run_sync.return_value = {"summary": {"total": 87, "ok": 25, "fail": 62}}
+        client = Grok2APIAccountClient(
+            {
+                "grok2api_enabled": True,
+                "grok2api_timeout": 45,
+            }
+        )
+        try:
+            with patch("services.grok_runtime.grok_runtime", runtime):
+                payload = client.refresh([f"token-{index}" for index in range(87)])
+
+            self.assertEqual(payload["summary"]["total"], 87)
+            self.assertEqual(runtime.run_sync.call_args.kwargs["timeout"], 180)
+            self.assertTrue(callable(runtime.run_sync.call_args.args[0]))
         finally:
             client._session.close()
 

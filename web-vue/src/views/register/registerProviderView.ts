@@ -145,6 +145,19 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
   result_path: '/getTaskResult',
   max_mail_retries: 3,
   xai_cli_oauth_enabled: true,
+  oauth_delivery: {
+    sub2api: {
+      enabled: false,
+      server_id: '',
+      group_mode: 'existing',
+      group_id: '',
+      group_name: '',
+    },
+    cpa: {
+      enabled: false,
+      pool_id: '',
+    },
+  },
   grok2api_enabled: true,
   grok2api_api_base: '',
   grok2api_admin_key: '',
@@ -227,6 +240,16 @@ export function normalizeTurnstileProvider(value: unknown): GrokTurnstileProvide
 
 export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig {
   const input = value && typeof value === 'object' ? value as Partial<GrokRegisterConfig> : {}
+  const deliveryInput = input.oauth_delivery && typeof input.oauth_delivery === 'object'
+    ? input.oauth_delivery
+    : defaultGrokRegisterConfig.oauth_delivery
+  const deliverySub2APIInput = deliveryInput.sub2api && typeof deliveryInput.sub2api === 'object'
+    ? deliveryInput.sub2api
+    : defaultGrokRegisterConfig.oauth_delivery.sub2api
+  const deliverySub2APIMode = deliverySub2APIInput.group_mode === 'custom' ? 'custom' : 'existing'
+  const deliveryCPAInput = deliveryInput.cpa && typeof deliveryInput.cpa === 'object'
+    ? deliveryInput.cpa
+    : defaultGrokRegisterConfig.oauth_delivery.cpa
   return {
     ...defaultGrokRegisterConfig,
     ...input,
@@ -240,6 +263,19 @@ export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig 
     result_path: String(input.result_path || defaultGrokRegisterConfig.result_path).trim(),
     max_mail_retries: Math.max(1, Math.min(20, Number(input.max_mail_retries) || defaultGrokRegisterConfig.max_mail_retries)),
     xai_cli_oauth_enabled: input.xai_cli_oauth_enabled !== false,
+    oauth_delivery: {
+      sub2api: {
+        enabled: Boolean(deliverySub2APIInput.enabled),
+        server_id: String(deliverySub2APIInput.server_id || '').trim(),
+        group_mode: deliverySub2APIMode,
+        group_id: deliverySub2APIMode === 'existing' ? String(deliverySub2APIInput.group_id || '').trim() : '',
+        group_name: deliverySub2APIMode === 'custom' ? String(deliverySub2APIInput.group_name || '').trim() : '',
+      },
+      cpa: {
+        enabled: Boolean(deliveryCPAInput.enabled),
+        pool_id: String(deliveryCPAInput.pool_id || '').trim(),
+      },
+    },
     grok2api_enabled: true,
     grok2api_api_base: '',
     grok2api_admin_key: '',
@@ -631,6 +667,18 @@ export function grokRequirementMessages(config: LegacyRegisterConfig | null | un
   const missing: string[] = []
   if (!isFilled(grok.api_key)) missing.push('Turnstile API Key')
   if (grok.provider === 'custom' && !isFilled(grok.api_base)) missing.push('Turnstile API Base')
+  const sub2api = grok.oauth_delivery.sub2api
+  if (sub2api.enabled) {
+    if (!isFilled(sub2api.server_id)) missing.push('OAuth 投递 Sub2API 连接')
+    if (sub2api.group_mode === 'custom') {
+      if (!isFilled(sub2api.group_name)) missing.push('OAuth 投递 Sub2API 自定义分组')
+    } else if (!isFilled(sub2api.group_id)) {
+      missing.push('OAuth 投递 Sub2API 分组')
+    }
+  }
+  if (grok.oauth_delivery.cpa.enabled && !isFilled(grok.oauth_delivery.cpa.pool_id)) {
+    missing.push('OAuth 投递 CPA 连接')
+  }
   return missing
 }
 

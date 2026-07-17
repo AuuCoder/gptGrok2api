@@ -16,6 +16,10 @@ export type GrokOAuthAccount = {
   last_refresh_at: string
   status: GrokOAuthAccountStatus | (string & {})
   source_type: string
+  metadata?: {
+    oauth_delivery?: GrokOAuthDeliveryResults
+    [key: string]: unknown
+  }
   models: string[]
   use_count: number
   fail_count: number
@@ -24,6 +28,16 @@ export type GrokOAuthAccount = {
   created_at: string
   updated_at: string
 }
+
+export type GrokOAuthDeliveryResult = {
+  status: 'success' | 'failed' | 'skipped' | (string & {})
+  target_id: string
+  at: string
+  error?: string
+  remote?: Record<string, unknown>
+}
+
+export type GrokOAuthDeliveryResults = Record<string, GrokOAuthDeliveryResult>
 
 export type GrokOAuthAccountsResponse = {
   provider: string
@@ -57,6 +71,7 @@ export type GrokOAuthProtocolJob = {
   updated_at: number
   account?: GrokOAuthAccount
   models: string[]
+  delivery?: GrokOAuthDeliveryResults
 }
 
 export type GrokOAuthImportRequest = {
@@ -66,6 +81,14 @@ export type GrokOAuthImportRequest = {
   email?: string
   subject?: string
   credential?: Record<string, unknown>
+}
+
+export type GrokOAuthAccountTestResponse = {
+  account_id: string
+  account: GrokOAuthAccount
+  model: string
+  content: string
+  elapsed_ms: number
 }
 
 const BASE_PATH = '/api/grok/oauth'
@@ -115,6 +138,13 @@ export const grokOAuthAccountsApi = {
     return apiClient.post<Record<string, never>, { account: GrokOAuthAccount; models: string[] }>(
       `${BASE_PATH}/accounts/${encodeURIComponent(id)}/models/sync`,
       {},
+    )
+  },
+
+  testAccount(id: string, payload: { model: string; prompt: string }) {
+    return apiClient.post<{ model: string; prompt: string }, GrokOAuthAccountTestResponse>(
+      `${BASE_PATH}/accounts/${encodeURIComponent(id)}/test`,
+      payload,
     )
   },
 

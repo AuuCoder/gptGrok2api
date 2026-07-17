@@ -691,20 +691,21 @@ def _unwrap_created_item(payload: object, *keys: str) -> dict:
     return item
 
 
-def _find_openai_group(groups: list[dict], name: str) -> dict | None:
+def _find_platform_group(groups: list[dict], name: str, platform: str) -> dict | None:
     expected = _clean(name).casefold()
+    expected_platform = _clean(platform).lower()
     if not expected:
         return None
     for group in groups:
         if not isinstance(group, dict) or _clean(group.get("name")).casefold() != expected:
             continue
-        platform = _clean(group.get("platform")).lower()
-        if platform in {"", "openai"}:
+        group_platform = _clean(group.get("platform")).lower()
+        if group_platform in {"", expected_platform}:
             return group
     return None
 
 
-def _create_openai_group(server: dict, name: str) -> tuple[int, str]:
+def _create_platform_group(server: dict, name: str, platform: str) -> tuple[int, str]:
     """Create a target group with the real Sub2API admin contract.
 
     No upstream response body is included in raised errors: it can contain
@@ -727,7 +728,7 @@ def _create_openai_group(server: dict, name: str) -> tuple[int, str]:
             json={
                 "name": name,
                 "description": "由 ChatGPT2API 注册同步创建",
-                "platform": "openai",
+                "platform": platform,
                 "rate_multiplier": 1,
             },
             timeout=30,
@@ -749,7 +750,7 @@ def _create_openai_group(server: dict, name: str) -> tuple[int, str]:
     return _positive_remote_id(created.get("id"), field="分组 ID"), (_clean(created.get("name")) or name)
 
 
-def _resolve_sync_group(server: dict, sync_config: dict) -> tuple[int, str]:
+def _resolve_sync_group(server: dict, sync_config: dict, *, platform: str = "openai") -> tuple[int, str]:
     if sync_config["group_mode"] == "existing":
         group_id = _positive_remote_id(sync_config.get("group_id"), field="分组 ID")
         return group_id, _clean(sync_config.get("group_name")) or str(group_id)
@@ -763,14 +764,14 @@ def _resolve_sync_group(server: dict, sync_config: dict) -> tuple[int, str]:
     # remote groups for the same selected custom target.
     with _sync_group_lock:
         try:
-            existing = _find_openai_group(list_remote_groups(server), group_name)
+            existing = _find_platform_group(list_remote_groups(server), group_name, platform)
         except Exception as exc:
             if isinstance(exc, Sub2APISyncError):
                 raise
             raise Sub2APISyncError("Sub2API 读取分组失败") from exc
         if existing is not None:
             return _positive_remote_id(existing.get("id"), field="分组 ID"), (_clean(existing.get("name")) or group_name)
-        return _create_openai_group(server, group_name)
+        return _create_platform_group(server, group_name, platform)
 
 
 def _openai_sync_credentials(account: dict) -> dict[str, str]:
@@ -814,6 +815,40 @@ def _sync_idempotency_key(server: dict, account: dict) -> str:
     source = f"{_clean(server.get('id'))}:{stable_value}:{token_fingerprint}"
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return f"chatgpt2api-sub2api-{digest}"
+
+
+def _xai_sync_credentials(account: dict) -> dict[str, str]:
+    access_token = _clean(account.get("access_token"))
+    refresh_token = _clean(account.get("refresh_token"))
+    if not access_token or not refresh_token:
+        raise Sub2APISyncError("本地 xAI 账号缺少 OAuth 凭据，无法同步")
+
+    credentials = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+    }
+    for source_key, target_key in (
+        ("id_token", "id_token"),
+        ("email", "email"),
+        ("subject", "subject"),
+        ("subject", "sub"),
+        ("token_type", "token_type"),
+    ):
+        value = _clean(account.get(source_key))
+        if value and target_key not in credentials:
+            credentials[target_key] = value
+    expires_at = _clean(account.get("expires_at") or account.get("expired"))
+    if expires_at:
+        credentials["expires_at"] = expires_at
+    return credentials
+
+
+def _xai_sync_idempotency_key(server: dict, account: dict) -> str:
+    stable_value = _clean(account.get("subject")) or _clean(account.get("email"))
+    token_fingerprint = hashlib.sha256(_clean(account.get("refresh_token")).encode("utf-8")).hexdigest()
+    source = f"{_clean(server.get('id'))}:xai:{stable_value}:{token_fingerprint}"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return f"chatgpt2api-sub2api-xai-{digest}"
 
 
 def sync_openai_account(server: dict, account: dict, sync_config: object) -> dict:
@@ -876,6 +911,73 @@ def sync_openai_account(server: dict, account: dict, sync_config: object) -> dic
         raise
     except Exception as exc:
         raise Sub2APISyncError("Sub2API 同步账号请求失败") from exc
+    finally:
+        try:
+            if session is not None:
+                session.close()
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "server_id": requested_server_id,
+        "server_name": _clean(server.get("name")) or base_url,
+        "group_id": str(group_id),
+        "group_name": group_name,
+        "account_id": _clean(remote_account.get("id")),
+    }
+
+
+def sync_xai_oauth_account(server: dict, account: dict, sync_config: object) -> dict:
+    """Push one locally saved xAI OAuth credential to a Sub2API xAI group."""
+    settings = normalize_sync_config(sync_config)
+    if not settings["enabled"]:
+        return {"ok": False, "skipped": True, "reason": "disabled"}
+    requested_server_id = settings["server_id"]
+    actual_server_id = _clean(server.get("id"))
+    if not requested_server_id:
+        raise Sub2APISyncError("请选择 Sub2API 连接")
+    if actual_server_id and requested_server_id != actual_server_id:
+        raise Sub2APISyncError("Sub2API 连接已变更，请重新保存注册配置")
+
+    base_url = _clean(server.get("base_url"))
+    if not base_url:
+        raise Sub2APISyncError("Sub2API 连接缺少地址")
+    credentials = _xai_sync_credentials(account)
+    group_id, group_name = _resolve_sync_group(server, settings, platform="xai")
+    account_name = _clean(account.get("email")) or _clean(account.get("subject")) or "xAI OAuth Account"
+
+    session = None
+    try:
+        headers = {
+            **_auth_headers(server),
+            "Content-Type": "application/json",
+            "Idempotency-Key": _xai_sync_idempotency_key(server, account),
+        }
+        session = _server_session(server)
+        response = session.post(
+            f"{base_url.rstrip('/')}/api/v1/admin/accounts",
+            headers=headers,
+            json={
+                "name": account_name,
+                "platform": "xai",
+                "type": "oauth",
+                "credentials": credentials,
+                "extra": {
+                    "import_source": "chatgpt2api_grok_registration",
+                    "synced_at": _now_iso(),
+                },
+                "group_ids": [group_id],
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            raise Sub2APISyncError(f"Sub2API 同步 xAI 账号失败（HTTP {response.status_code}）")
+        remote_account = _unwrap_created_item(response.json(), "account", "item", "record")
+    except Sub2APISyncError:
+        raise
+    except Exception as exc:
+        raise Sub2APISyncError("Sub2API 同步 xAI 账号请求失败") from exc
     finally:
         try:
             if session is not None:

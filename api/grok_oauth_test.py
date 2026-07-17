@@ -62,6 +62,29 @@ class GrokOAuthAdminRouterTest(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["job"]["status"], "running")
 
+    def test_account_probe_route_targets_requested_oauth_account(self) -> None:
+        result = {
+            "account_id": "oauth-one",
+            "account": {"id": "oauth-one", "email": "oa***e@example.com"},
+            "model": "grok-4.5",
+            "content": "OK",
+            "elapsed_ms": 120,
+        }
+        with patch("api.grok_oauth.require_admin", return_value={"id": "admin", "role": "admin"}), patch.object(
+            grok_oauth.xai_cli_oauth_service,
+            "test_account",
+            new=AsyncMock(return_value=result),
+        ) as test_account:
+            response = self.client.post(
+                "/api/grok/oauth/accounts/oauth-one/test",
+                json={"model": "grok-4.5", "prompt": "只回复 OK"},
+                headers={"Authorization": "Bearer test-admin-key"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["account_id"], "oauth-one")
+        test_account.assert_awaited_once_with("oauth-one", model="grok-4.5", prompt="只回复 OK")
+
 
 if __name__ == "__main__":
     unittest.main()

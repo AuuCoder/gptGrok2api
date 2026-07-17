@@ -1,6 +1,8 @@
 """curl_cffi session builder for reverse-proxy requests."""
 
 import asyncio
+import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -10,6 +12,36 @@ from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
+
+
+_COMPOSE_PRIVOXY_URL = "http://privoxy:8118"
+_DEFAULT_HOST_PRIVOXY_PORT = 40080
+
+
+def _is_container_environment() -> bool:
+    override = str(os.getenv("CHATGPT2API_IN_CONTAINER") or "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _runtime_proxy_for_environment(url: str) -> str:
+    candidate = normalize_proxy_url(url)
+    if candidate.rstrip("/").lower() != _COMPOSE_PRIVOXY_URL or _is_container_environment():
+        return candidate
+
+    override = normalize_proxy_url(os.getenv("CHATGPT2API_HOST_PRIVOXY_URL") or "")
+    if override:
+        return override
+    try:
+        port = int(os.getenv("PRIVOXY_PORT") or _DEFAULT_HOST_PRIVOXY_PORT)
+    except (TypeError, ValueError):
+        port = _DEFAULT_HOST_PRIVOXY_PORT
+    if not 1 <= port <= 65535:
+        port = _DEFAULT_HOST_PRIVOXY_PORT
+    return f"http://127.0.0.1:{port}"
 
 
 def _skip_proxy_ssl(proxy_url: str) -> bool:
@@ -51,7 +83,7 @@ def build_session_kwargs(
     # Proxy URL.
     proxy_url = ""
     if lease is not None and lease.proxy_url:
-        proxy_url = normalize_proxy_url(lease.proxy_url)
+        proxy_url = _runtime_proxy_for_environment(lease.proxy_url)
         scheme = urlparse(proxy_url).scheme.lower()
         if scheme.startswith("socks"):
             kwargs.setdefault("proxy", proxy_url)

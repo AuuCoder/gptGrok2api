@@ -208,6 +208,29 @@ class EmbeddedGrokRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"added": 2, "skipped": 0})
         self.assertEqual([item.token for item in repo.upserts], ["keep-token", "runtime-only-token"])
 
+    async def test_manual_refresh_caps_single_egress_concurrency(self) -> None:
+        runtime = EmbeddedGrokRuntime()
+        response = JSONResponse(
+            {
+                "summary": {"total": 2, "ok": 2, "fail": 0},
+                "results": {
+                    "token-one": {"refreshed": 1},
+                    "token-two": {"refreshed": 1},
+                },
+            }
+        )
+        with patch.object(runtime, "_state", return_value=(object(), object())), patch(
+            "app.products.web.admin.batch.batch_refresh",
+            new=AsyncMock(return_value=response),
+        ) as refresh, patch(
+            "app.platform.config.snapshot.get_config",
+            return_value=15,
+        ), patch.object(runtime, "sync_host_accounts_from_runtime", AsyncMock()):
+            result = await runtime.refresh_accounts(["token-one", "token-two"])
+
+        self.assertEqual(result["summary"], {"total": 2, "ok": 2, "fail": 0})
+        self.assertEqual(refresh.await_args.kwargs["concurrency"], 15)
+
     async def test_chat_test_uses_explicit_token_without_tools_and_records_synced_account(self) -> None:
         token = "explicit-sso-token"
         runtime = EmbeddedGrokRuntime()

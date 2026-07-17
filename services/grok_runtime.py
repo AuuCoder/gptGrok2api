@@ -22,6 +22,7 @@ T = TypeVar("T")
 GROK_ACCOUNT_CHAT_TEST_MODEL = "grok-4.3-console"
 GROK_ACCOUNT_CHAT_TEST_MAX_OUTPUT_TOKENS = 64
 GROK_ACCOUNT_CHAT_TEST_TIMEOUT_S = 45.0
+GROK_ACCOUNT_REFRESH_MAX_CONCURRENCY = 15
 
 
 def _response_payload(value: Any) -> dict[str, Any]:
@@ -351,13 +352,19 @@ class EmbeddedGrokRuntime:
 
     async def refresh_accounts(self, tokens: list[str]) -> dict[str, Any]:
         from app.products.web.admin.batch import BatchRequest, batch_refresh
+        from app.platform.config.snapshot import get_config
 
         repo, refresh_service = self._state()
+        try:
+            configured_concurrency = int(get_config("account.refresh.usage_concurrency", 15) or 15)
+        except (TypeError, ValueError):
+            configured_concurrency = 15
+        configured_concurrency = max(1, configured_concurrency)
         response = await batch_refresh(
             BatchRequest(tokens=tokens),
             async_mode=False,
             all_manageable=False,
-            concurrency=None,
+            concurrency=min(GROK_ACCOUNT_REFRESH_MAX_CONCURRENCY, configured_concurrency),
             repo=repo,
             refresh_svc=refresh_service,
         )

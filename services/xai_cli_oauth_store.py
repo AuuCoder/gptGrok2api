@@ -452,6 +452,26 @@ class XaiCliOAuthAccountStore:
             return None
         return self._redacted(records[0]) if redacted else records[0]
 
+    def update_metadata(self, account_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Merge non-secret operational metadata into one stored account."""
+        clean_id = _clean_text(account_id)
+        safe_updates = _safe_metadata(updates)
+        if not clean_id or not isinstance(safe_updates, dict):
+            return None
+        with self._lock:
+            items = self._load_unlocked()
+            for index, current in enumerate(items):
+                if _clean_text(current.get("id")) != clean_id:
+                    continue
+                metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+                updated = dict(current)
+                updated["metadata"] = {**metadata, **safe_updates}
+                updated["updated_at"] = _now()
+                items[index] = updated
+                self._save_unlocked(items)
+                return self._redacted(updated)
+        return None
+
     def select_next_account(self, *, exclude_ids: list[str] | None = None) -> dict[str, Any] | None:
         """Return the next active account for internal provider use.
 

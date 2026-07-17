@@ -18,6 +18,7 @@ export interface ProxySampleTestResult extends ProxyTestResult {
   sample_count: number
   attempts: ProxySampleAttempt[]
   normalized_urls?: string
+  normalized_changed?: boolean
 }
 
 export interface ProxyProfile {

@@ -136,6 +136,35 @@ class AccountRefreshFastVerifyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(patch.quota_console["remaining"], 0)
         self.assertEqual(patch.quota_console["source"], int(QuotaSource.ESTIMATED))
 
+    async def test_manual_refresh_failure_records_visible_metadata(self) -> None:
+        service, repo = self._service()
+        with patch.object(service, "_fetch_all_quotas", AsyncMock(return_value=None)):
+            result = await service._refresh_one(repo.record, track_result=True)
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(len(repo.patches), 1)
+        metadata = repo.patches[0].ext_merge
+        self.assertEqual(metadata["refresh_status"], "failed")
+        self.assertEqual(metadata["refresh_error"], "上游未返回真实额度数据")
+        self.assertGreater(metadata["refresh_at"], 0)
+
+    async def test_manual_refresh_success_clears_previous_failure(self) -> None:
+        service, repo = self._service()
+        quota = QuotaWindow(
+            remaining=8,
+            total=30,
+            window_seconds=86_400,
+            reset_at=123,
+            synced_at=100,
+            source=QuotaSource.REAL,
+        )
+        with patch.object(service, "_fetch_all_quotas", AsyncMock(return_value={1: quota})):
+            result = await service._refresh_one(repo.record, track_result=True)
+
+        self.assertEqual(result.refreshed, 1)
+        self.assertEqual(repo.patches[0].ext_merge["refresh_status"], "success")
+        self.assertEqual(repo.patches[0].ext_merge["refresh_error"], "")
+
     async def test_legacy_console_429_expiry_recovers_without_history_or_delay(self) -> None:
         now = 1_000_000
 

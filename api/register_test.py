@@ -257,7 +257,17 @@ class RegisterGrokAccountsApiTest(unittest.TestCase):
             "current": 1,
             "current_id": "grok-one",
             "cancel_requested": False,
-            "summary": {"total": 2, "success": 0, "limited": 0, "permission": 0, "failed": 0, "skipped": 1, "pending": 1},
+            "summary": {
+                "total": 2,
+                "success": 0,
+                "blocked": 0,
+                "invalid": 0,
+                "limited": 0,
+                "permission": 0,
+                "failed": 0,
+                "skipped": 1,
+                "pending": 1,
+            },
             "results": [
                 {"id": "grok-one", "status": "pending", "error": "", "elapsed_ms": 0},
                 {"id": "grok-two", "status": "skipped", "error": "账号未保存 SSO 登录态", "elapsed_ms": 0},

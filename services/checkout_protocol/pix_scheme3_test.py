@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, call, patch
 from urllib.parse import urlsplit
 
@@ -8,6 +10,55 @@ from services.checkout_protocol import pix_scheme3, pix_scheme3_core
 
 
 class PixScheme3Test(unittest.TestCase):
+    def test_loads_complete_billing_from_approved_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "20260716-000001_0001_pix_confirm.txt").write_text(
+                """stage: pix_confirm
+request: POST https://api.stripe.com/v1/payment_pages/cs_history/confirm
+request_body:
+{
+  "payment_method_data[billing_details][name]": "Gabriel Almeida",
+  "payment_method_data[billing_details][email]": "buyer@example.com",
+  "payment_method_data[billing_details][phone]": "+5511999999999",
+  "payment_method_data[billing_details][tax_id]": "578.214.331-28",
+  "payment_method_data[billing_details][address][country]": "BR",
+  "payment_method_data[billing_details][address][line1]": "Avenida Paulista 1000",
+  "payment_method_data[billing_details][address][city]": "Sao Paulo",
+  "payment_method_data[billing_details][address][state]": "SP",
+  "payment_method_data[billing_details][address][postal_code]": "01310100"
+}
+""",
+                encoding="utf-8",
+            )
+            (root / "20260716-000002_0002_approve.txt").write_text(
+                'request_body:\n{"checkout_session_id":"cs_history"}\nresponse:\n{"result":"approved"}\n',
+                encoding="utf-8",
+            )
+            accounts_path = root / "accounts.json"
+            accounts_path.write_text(
+                '[{"checkout_session_id":"cs_history","checkout_link_status":"ready"}]',
+                encoding="utf-8",
+            )
+
+            profile = pix_scheme3.load_approved_pix_billing_profile(root, accounts_path)
+
+        self.assertEqual(profile["name"], "Gabriel Almeida")
+        self.assertEqual(profile["tax_id"], "57821433128")
+        self.assertEqual(profile["state"], "SP")
+        self.assertEqual(profile["postal_code"], "01310100")
+
+    def test_br_billing_uses_brazilian_name_pool(self) -> None:
+        billing = pix_scheme3_core.opll_billing_for_country("BR")
+
+        self.assertIn(
+            billing["name"],
+            {"Gabriel Almeida", "Lucas Oliveira", "Mariana Santos", "Beatriz Costa"},
+        )
+        self.assertEqual(billing["country"], "BR")
+        self.assertIn(billing["state"], {"SP", "RJ", "MG", "RS"})
+        self.assertTrue(billing["postal_code"])
+
     def test_compact_proxy_is_normalized_and_rewritten_per_region(self) -> None:
         compact = "us.lajiaohttp.net:2000:test-user-region-BR:test-pass"
 
@@ -29,6 +80,23 @@ class PixScheme3Test(unittest.TestCase):
         self.assertEqual(parsed.password, "test-pass")
         self.assertEqual(parsed.hostname, "us.lajiaohttp.net")
         self.assertEqual(parsed.port, 2000)
+
+    def test_smartproxy_area_selector_preserves_lifetime_and_session(self) -> None:
+        proxy = (
+            "socks5h://account_area-BR_life-120_session-sessionvalue:secret"
+            "@proxy.example.test:1000"
+        )
+
+        rewritten = pix_scheme3.proxy_for_region(proxy, "VN")
+        parsed = urlsplit(rewritten)
+
+        self.assertEqual(
+            parsed.username,
+            "account_area-VN_life-120_session-sessionvalue",
+        )
+        self.assertEqual(parsed.password, "secret")
+        self.assertEqual(parsed.hostname, "proxy.example.test")
+        self.assertEqual(parsed.port, 1000)
 
     def test_provider_attempt_runs_reference_br_vn_sequence(self) -> None:
         billing = {
@@ -70,8 +138,9 @@ class PixScheme3Test(unittest.TestCase):
         tax_stripe = MagicMock()
 
         with (
+            patch.object(pix_scheme3, "load_approved_pix_billing_profile", return_value={}),
             patch.object(pix_scheme3.core, "opll_billing_for_country", return_value=billing),
-            patch.object(pix_scheme3, "generate_valid_cpf", return_value="06054391605"),
+            patch.object(pix_scheme3, "generate_valid_cpf", return_value="57821433128"),
             patch.object(pix_scheme3, "create_pix_checkout", return_value=checkout),
             patch.object(pix_scheme3.core, "opll_stripe_key_for_checkout", return_value="pk_scheme3"),
             patch.object(

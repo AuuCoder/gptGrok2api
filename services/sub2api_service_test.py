@@ -146,6 +146,54 @@ class Sub2APIAccountSyncTest(unittest.TestCase):
         self.assertNotIn("access-token-must-not-leak", message)
         self.assertNotIn("refresh-token-must-not-leak", message)
 
+    def test_sync_xai_oauth_uses_xai_platform_and_credentials(self) -> None:
+        session = MagicMock()
+        session.post.return_value = _Response(201, {"data": {"id": "remote-xai-account"}})
+        sync_config = sub2api_service.normalize_sync_config({
+            "enabled": True,
+            "server_id": "remote-server",
+            "group_id": "52",
+        })
+        account = {
+            **self._account(),
+            "subject": "xai-principal-one",
+            "token_type": "Bearer",
+        }
+
+        with patch("services.sub2api_service.Session", return_value=session):
+            result = sub2api_service.sync_xai_oauth_account(self._server(), account, sync_config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["account_id"], "remote-xai-account")
+        account_call = self._post_call_for(session, "/api/v1/admin/accounts")
+        payload = account_call.kwargs["json"]
+        self.assertEqual(payload["platform"], "xai")
+        self.assertEqual(payload["type"], "oauth")
+        self.assertEqual(payload["group_ids"], [52])
+        self.assertEqual(payload["credentials"]["subject"], "xai-principal-one")
+        self.assertEqual(payload["credentials"]["sub"], "xai-principal-one")
+        self.assertNotIn("new-account@example.test", account_call.kwargs["headers"]["Idempotency-Key"])
+
+    def test_sync_xai_custom_group_is_created_for_xai_platform(self) -> None:
+        session = MagicMock()
+        session.get.return_value = _Response(200, {"data": {"items": [], "total": 0}})
+        session.post.side_effect = [
+            _Response(201, {"data": {"id": 19, "name": "Grok OAuth"}}),
+            _Response(201, {"data": {"id": "remote-xai-account"}}),
+        ]
+        sync_config = sub2api_service.normalize_sync_config({
+            "enabled": True,
+            "server_id": "remote-server",
+            "group_mode": "custom",
+            "group_name": "Grok OAuth",
+        })
+
+        with patch("services.sub2api_service.Session", return_value=session):
+            sub2api_service.sync_xai_oauth_account(self._server(), self._account(), sync_config)
+
+        group_call = self._post_call_for(session, "/api/v1/admin/groups")
+        self.assertEqual(group_call.kwargs["json"]["platform"], "xai")
+
 
 class Sub2APITLSVerificationTest(unittest.TestCase):
     @staticmethod

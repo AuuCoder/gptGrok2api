@@ -386,7 +386,7 @@ def proxy_key(proxy: str) -> str:
 
 
 _PROXY_COUNTRY_SELECTOR_RE = re.compile(
-    r"(?i)(?P<name>country|region)(?P<separator>[-_=])(?P<value>[a-z]{2}(?:,[a-z]{2})*)"
+    r"(?i)(?P<name>country|region|area)(?P<separator>[-_=])(?P<value>[a-z]{2}(?:,[a-z]{2})*)"
 )
 _KOOKEEY_COUNTRY_SELECTOR_RE = re.compile(
     r"(?i)^(?P<prefix>.+-)(?P<value>global|[a-z]{2})"

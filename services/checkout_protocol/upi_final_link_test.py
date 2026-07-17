@@ -503,6 +503,17 @@ class UPIFinalLinkBridgeTest(unittest.TestCase):
         self.assertIn("secret-VN-session-12345678-life-5m", rewritten)
         self.assertEqual(upi.proxy_chain_key(proxy), upi.proxy_chain_key(rewritten))
 
+    def test_smartproxy_area_selector_preserves_lifetime_and_session(self) -> None:
+        proxy = (
+            "socks5h://account_area-BR_life-120_session-sessionvalue:secret"
+            "@proxy.example.test:1000"
+        )
+
+        rewritten = upi.proxy_for_country(proxy, "VN")
+
+        self.assertIn("account_area-VN_life-120_session-sessionvalue", rewritten)
+        self.assertEqual(upi.proxy_chain_key(proxy), upi.proxy_chain_key(rewritten))
+
     def test_kookeey_compact_password_country_segment_is_rewritten(self) -> None:
         proxy = "socks5h://account:secret-NL-77297054@gate.kookeey.info:1000"
 

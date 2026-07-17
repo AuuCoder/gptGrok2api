@@ -262,6 +262,9 @@ class GrokAccountStoreTest(unittest.TestCase):
                     "use_count": 7,
                     "fail_count": 1,
                     "tags": ["registered", "nsfw"],
+                    "refresh_status": "failed",
+                    "refresh_at": 123456789,
+                    "refresh_error": "上游未返回真实额度数据",
                 },
                 {
                     "token": "runtime-only-token",
@@ -283,6 +286,9 @@ class GrokAccountStoreTest(unittest.TestCase):
         self.assertEqual(saved["runtime"]["status"], "disabled")
         self.assertEqual(saved["runtime"]["pool"], "super")
         self.assertEqual(saved["runtime"]["use_count"], 7)
+        self.assertEqual(saved["runtime"]["refresh_status"], "failed")
+        self.assertEqual(saved["runtime"]["refresh_at"], 123456789)
+        self.assertEqual(saved["runtime"]["refresh_error"], "上游未返回真实额度数据")
         self.assertEqual(items["runtime-only-token"]["source_type"], "runtime")
         self.assertEqual(items["runtime-only-token"]["email"], "")
         self.assertEqual(items["runtime-only-token"]["runtime"]["status"], "cooling")

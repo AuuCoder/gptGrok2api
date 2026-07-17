@@ -592,7 +592,7 @@ func (c *AppleAuthClient) authSRP(ctx context.Context, session *appleAuthSession
 		}
 		headers["X-Apple-HC"] = hc
 	}
-	status, _, err := c.do(ctx, session, http.MethodPost, session.Endpoints.Auth+"/signin/complete?isRememberMeEnabled=true", headers, completeBody, nil, true)
+	status, _, err := c.doWithTransientRetry(ctx, session, http.MethodPost, session.Endpoints.Auth+"/signin/complete?isRememberMeEnabled=true", headers, completeBody, nil, true)
 	if status == http.StatusUnauthorized {
 		return false, errCode("apple_credentials_invalid", "Apple ID 或密码错误，请检查后重新协议登录", false)
 	}
@@ -1007,6 +1007,13 @@ func (c *AppleAuthClient) do(ctx context.Context, session *appleAuthSession, met
 		path := rawURL
 		if parsed, parseErr := url.Parse(rawURL); parseErr == nil && parsed.Path != "" {
 			path = parsed.Path
+		}
+		if code == "apple_protocol_http_transient" {
+			return resp.StatusCode, nil, errCode(
+				code,
+				fmt.Sprintf("Apple 服务暂时不可用（HTTP %d，%s），已自动重试，请稍后再试", resp.StatusCode, path),
+				true,
+			)
 		}
 		return resp.StatusCode, nil, errCode(code, fmt.Sprintf("Apple 协议 HTTP %d（%s）: %s", resp.StatusCode, path, trimForError(data)), true)
 	}

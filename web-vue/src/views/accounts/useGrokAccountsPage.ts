@@ -35,6 +35,7 @@ export const grokAccountStatusFilterOptions = [
   { label: '提交待确认', value: 'submission_unconfirmed' },
   { label: '运行正常', value: 'normal' },
   { label: '运行限流', value: 'limited' },
+  { label: '刷新失败', value: 'refresh_failed' },
   { label: '运行异常', value: 'abnormal' },
   { label: '运行禁用', value: 'disabled' },
 ] as const satisfies ReadonlyArray<{ label: string; value: GrokAccountStatusFilter }>
@@ -230,7 +231,8 @@ export function useGrokAccountsPage() {
       const result = await grokAccountsApi.refreshRuntime(ids)
       const ok = Number(result.summary?.ok || 0)
       const fail = Number(result.summary?.fail || 0)
-      if (fail > 0) toast.warning(`刷新完成：成功 ${ok}，失败 ${fail}${result.error ? `；${result.error}` : ''}`)
+      const detail = String(result.error || result.results?.find((item) => item.error)?.error || '').trim()
+      if (fail > 0) toast.warning(`刷新完成：成功 ${ok}，失败 ${fail}${detail ? `；${detail}` : ''}`)
       else toast.success(`已刷新 ${ok} 个 Grok 账号`)
       await loadData({ silentErrorToast: true })
       return fail === 0

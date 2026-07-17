@@ -5,6 +5,17 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
+export function grokRefreshFailed(item: GrokAccount): boolean {
+  return cleanString(item.refresh_status).toLowerCase() === 'failed'
+}
+
+export function grokRefreshStatusTitle(item: GrokAccount): string {
+  if (!grokRefreshFailed(item)) return ''
+  const error = cleanString(item.refresh_error) || '上游未返回真实额度数据'
+  const refreshedAt = formatGrokAccountDate(item.refresh_at)
+  return refreshedAt === '-' ? error : `${error}（${refreshedAt}）`
+}
+
 export function grokAccountStatusText(item: GrokAccount): string {
   const status = cleanString(item.status).toLowerCase()
   if (status === 'active') return '可用'
@@ -38,6 +49,7 @@ export function grokRuntimeStatusText(item: GrokAccount): string {
   if (status === 'cooling' || status === 'rate_limited') return '限流'
   if (status === 'invalid' || status === 'expired') return '异常'
   if (status === 'disabled') return '禁用'
+  if (status === 'active' && grokRefreshFailed(item)) return '刷新失败'
   return cleanString(item.runtime_status)
 }
 
@@ -46,6 +58,7 @@ export function grokRuntimeStatusClass(item: GrokAccount): string {
   if (status === 'active') return PILL_TONE_CLASS.success
   if (status === 'cooling' || status === 'rate_limited') return PILL_TONE_CLASS.warning
   if (status === 'invalid' || status === 'expired') return PILL_TONE_CLASS.danger
+  if (status === 'active' && grokRefreshFailed(item)) return PILL_TONE_CLASS.warning
   return PILL_TONE_CLASS.neutral
 }
 
@@ -81,6 +94,7 @@ export function grokAccountRowClass(item: GrokAccount): string {
   if (runtimeStatus === 'disabled') return 'bg-muted/50'
   if (runtimeStatus === 'invalid' || runtimeStatus === 'expired') return 'bg-rose-500/5'
   if (runtimeStatus === 'cooling' || runtimeStatus === 'rate_limited') return 'bg-amber-500/5'
+  if (grokRefreshFailed(item)) return 'bg-amber-500/5'
   if (status === 'submission_failed') return 'bg-rose-500/5'
   if (status && status !== 'active') return 'bg-amber-500/5'
   return ''
@@ -185,6 +199,13 @@ export function grokAccountDetailItems(item: GrokAccount) {
     { label: '成功 / 失败', value: grokUsageText(item) },
     { label: '成功率', value: grokSuccessRate(item) },
     { label: '最近使用', value: formatGrokAccountDate(item.last_used_at) },
+    { label: '最近刷新', value: formatGrokAccountDate(item.refresh_at) },
+    {
+      label: '刷新结果',
+      value: grokRefreshFailed(item)
+        ? (cleanString(item.refresh_error) || '刷新失败')
+        : cleanString(item.refresh_status) === 'success' ? '成功' : '-',
+    },
   ]
 }
 
@@ -201,6 +222,9 @@ export function grokAccountRowSignature(item: GrokAccount): string {
     item.use_count || 0,
     item.fail_count || 0,
     item.last_used_at,
+    item.refresh_status,
+    item.refresh_at,
+    item.refresh_error,
     (item.tags || []).join(','),
     item.sync_state,
     item.oauth?.id,

@@ -196,10 +196,18 @@ class LocalAccountRepository:
             remaining = row[f"{mode}_remaining"]
             total = row[f"{mode}_total"]
             if always_include or remaining is not None or total is not None:
-                quota[mode] = {
+                item = {
                     "remaining": cls._payload_int(remaining),
                     "total": cls._payload_int(total),
                 }
+                if mode == "console":
+                    reset_at = cls._payload_int(row["console_reset_at"])
+                    source = cls._payload_int(row["console_source"])
+                    if reset_at > 0:
+                        item["reset_at"] = reset_at
+                    if source in (0, 1, 2):
+                        item["source"] = source
+                quota[mode] = item
 
         return {
             "token": row["token"],
@@ -210,6 +218,9 @@ class LocalAccountRepository:
             "fail_count": cls._payload_int(row["usage_fail_count"]),
             "last_used_at": row["last_use_at"],
             "tags": cls._parse_tags(row["tags"]),
+            "refresh_status": str(row["refresh_status"] or ""),
+            "refresh_at": row["refresh_at"],
+            "refresh_error": str(row["refresh_error"] or "")[:300],
         }
 
     def _upsert_sync(
@@ -578,6 +589,20 @@ class LocalAccountRepository:
             f"THEN json_extract({column}, '$.total') END AS {mode}_total"
             for mode, column, _always_include in _TOKEN_PAYLOAD_QUOTAS
         )
+        console_metadata_select = (
+            "CASE WHEN json_valid(quota_console) "
+            "THEN json_extract(quota_console, '$.reset_at') END AS console_reset_at, "
+            "CASE WHEN json_valid(quota_console) "
+            "THEN json_extract(quota_console, '$.source') END AS console_source"
+        )
+        refresh_metadata_select = (
+            "CASE WHEN json_valid(ext) "
+            "THEN json_extract(ext, '$.refresh_status') END AS refresh_status, "
+            "CASE WHEN json_valid(ext) "
+            "THEN json_extract(ext, '$.refresh_at') END AS refresh_at, "
+            "CASE WHEN json_valid(ext) "
+            "THEN json_extract(ext, '$.refresh_error') END AS refresh_error"
+        )
         return f"""
             SELECT
                 token,
@@ -587,7 +612,9 @@ class LocalAccountRepository:
                 usage_use_count,
                 usage_fail_count,
                 last_use_at,
-                {quota_select}
+                {quota_select},
+                {console_metadata_select},
+                {refresh_metadata_select}
             FROM {_TBL}
             WHERE deleted_at IS NULL
             ORDER BY updated_at DESC

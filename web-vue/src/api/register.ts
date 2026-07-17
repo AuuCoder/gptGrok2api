@@ -84,6 +84,14 @@ export type RegisterTarget = 'openai' | 'grok'
 
 export type GrokTurnstileProvider = 'yescaptcha' | '2captcha' | 'custom'
 
+export type GrokOAuthDeliveryConfig = {
+  sub2api: OpenAISub2APISyncConfig
+  cpa: {
+    enabled: boolean
+    pool_id: string
+  }
+}
+
 export type GrokRegisterConfig = {
   provider: GrokTurnstileProvider | string
   api_key: string
@@ -95,6 +103,7 @@ export type GrokRegisterConfig = {
   result_path: string
   max_mail_retries: number
   xai_cli_oauth_enabled: boolean
+  oauth_delivery: GrokOAuthDeliveryConfig
   grok2api_enabled: boolean
   grok2api_api_base: string
   grok2api_admin_key: string

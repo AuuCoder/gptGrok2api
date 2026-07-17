@@ -271,29 +271,41 @@ async def fetch_mode_quota(token: str, mode_id: int) -> object | None:
     return await _fetch_one(token, mode_id)
 
 
+def invalid_credentials_body_kind(body: str) -> Literal["blocked", "invalid", ""]:
+    """Classify explicit Grok blocked-account and invalid-session markers."""
+    text = str(body or "").lower()
+    if any(marker in text for marker in ("blocked-user", "email-domain-rejected", "account suspended")):
+        return "blocked"
+    if any(
+        marker in text
+        for marker in (
+            "invalid-credentials",
+            "bad-credentials",
+            "failed to look up session id",
+            "session not found",
+            "token revoked",
+            "token expired",
+        )
+    ):
+        return "invalid"
+    return ""
+
+
 def is_invalid_credentials_body(body: str) -> bool:
     """Return whether *body* contains a Grok invalid/blocked account marker."""
-    text = str(body or "").lower()
-    return (
-        "invalid-credentials" in text
-        or "bad-credentials" in text
-        or "failed to look up session id" in text
-        or "blocked-user" in text
-        or "email-domain-rejected" in text
-        or "session not found" in text
-        or "account suspended" in text
-        or "token revoked" in text
-        or "token expired" in text
-    )
+    return bool(invalid_credentials_body_kind(body))
+
+
+def invalid_credentials_error_kind(exc: BaseException) -> Literal["blocked", "invalid", ""]:
+    """Return a credential classification only when the upstream body proves it."""
+    if not isinstance(exc, UpstreamError) or exc.status not in (400, 401, 403):
+        return ""
+    return invalid_credentials_body_kind(str(exc.details.get("body", "") or ""))
 
 
 def is_invalid_credentials_error(exc: BaseException) -> bool:
     """Return whether *exc* indicates the account is invalid or blocked."""
-    if not isinstance(exc, UpstreamError):
-        return False
-    if exc.status not in (400, 401, 403):
-        return False
-    return is_invalid_credentials_body(str(exc.details.get("body", "") or ""))
+    return bool(invalid_credentials_error_kind(exc))
 
 
 def _proxy_feedback_kind_for_error(
@@ -321,6 +333,8 @@ def _proxy_feedback_kind_for_error(
 
 __all__ = [
     "FastQuotaProbeResult",
+    "invalid_credentials_body_kind",
+    "invalid_credentials_error_kind",
     "parse_rate_limits",
     "fetch_all_quotas",
     "fetch_mode_quota",

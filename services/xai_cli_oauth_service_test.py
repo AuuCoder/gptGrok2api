@@ -113,6 +113,53 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(two["reused"])
         self.assertNotEqual(two["job"]["id"], one["job"]["id"])
 
+    async def test_protocol_authorization_stays_successful_when_one_delivery_target_fails(self) -> None:
+        source = {
+            "id": "grok-delivery-source",
+            "email": "delivery@example.com",
+            "password": "source-password",
+        }
+        credential = {
+            "access_token": _jwt({"sub": "delivery-subject", "email": "delivery@example.com", "exp": int(time.time()) + 3600}),
+            "refresh_token": "delivery-refresh",
+            "id_token": "",
+            "expires_in": 3600,
+        }
+        protocol = SimpleNamespace(authorize=lambda **_kwargs: credential)
+        delivery = {
+            "sub2api": {"status": "success", "target_id": "server-one", "at": "2030-01-01T00:00:00+00:00"},
+            "cpa": {"status": "failed", "target_id": "pool-one", "at": "2030-01-01T00:00:00+00:00", "error": "HTTP 503"},
+        }
+
+        with patch.object(self.service, "_select_protocol_source_account", return_value=source), patch(
+            "services.register_service.register_service.get",
+            return_value={"grok": {"oauth_delivery": {}}, "proxy": "direct"},
+        ), patch(
+            "services.xai_device_oauth_protocol.XaiDeviceOAuthProtocol",
+            return_value=protocol,
+        ), patch.object(
+            self.service,
+            "_fetch_models",
+            new=AsyncMock(return_value=["grok-4.5"]),
+        ), patch(
+            "services.xai_oauth_delivery_service.deliver_xai_oauth_account",
+            return_value=delivery,
+        ):
+            started = await self.service.start_protocol_authorization("grok-delivery-source")
+            job_id = started["job"]["id"]
+            for _ in range(50):
+                await asyncio.sleep(0)
+                job = self.service.get_protocol_authorization_job(job_id)
+                if job and job["status"] not in {"pending", "running"}:
+                    break
+
+        self.assertEqual(job["status"], "authorized")
+        self.assertIn("外部投递部分失败", job["message"])
+        self.assertEqual(job["delivery"], delivery)
+        account = self.store.list_accounts(redacted=False)[0]
+        self.assertEqual(account["metadata"]["oauth_delivery"], delivery)
+        self.assertNotIn("delivery-refresh", repr(job))
+
     async def test_background_protocol_entry_runs_to_terminal_state(self) -> None:
         source = {"id": "grok-background", "email": "background@example.com", "password": "password"}
         completed = threading.Event()
@@ -182,6 +229,33 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Cookie", headers)
         item = self.store.list_accounts()[0]
         self.assertEqual(item["use_count"], 1)
+
+    async def test_account_probe_uses_only_the_requested_oauth_account(self) -> None:
+        first = self._account()
+        second = self.store.upsert(
+            {
+                "email": "second@example.com",
+                "subject": "subject-second",
+                "access_token": "second-access",
+                "refresh_token": "second-refresh",
+                "expires_at": "2030-01-01T00:00:00+00:00",
+                "models": ["grok-4.5"],
+            }
+        )["item"]
+        upstream = httpx.Response(
+            200,
+            json={"id": "resp_test", "output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}]},
+        )
+
+        with patch.object(self.service, "_post_response", new=AsyncMock(return_value=upstream)) as post_response:
+            result = await self.service.test_account(str(second["id"]), model="grok-4.5", prompt="只回复 OK")
+
+        self.assertEqual(result["account_id"], second["id"])
+        self.assertEqual(result["content"], "OK")
+        self.assertEqual(post_response.await_args.args[0]["id"], second["id"])
+        by_id = {item["id"]: item for item in self.store.list_accounts()}
+        self.assertEqual(by_id[first["id"]]["use_count"], 0)
+        self.assertEqual(by_id[second["id"]]["use_count"], 1)
 
     async def test_stream_request_reports_selected_account_when_iteration_starts(self) -> None:
         account = self._account()

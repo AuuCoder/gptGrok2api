@@ -43,6 +43,9 @@ _RUNTIME_ACCOUNT_FIELDS = (
     "fail_count",
     "last_used_at",
     "tags",
+    "refresh_status",
+    "refresh_at",
+    "refresh_error",
 )
 
 
@@ -108,6 +111,9 @@ def _runtime_snapshot(item: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
     if not isinstance(last_used_at, (str, int, float)):
         last_used_at = None
     tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+    refresh_at = item.get("refresh_at")
+    if not isinstance(refresh_at, (str, int, float)):
+        refresh_at = None
     return token, {
         "present": True,
         "status": _clean_text(item.get("status")).lower() or "active",
@@ -117,6 +123,9 @@ def _runtime_snapshot(item: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
         "fail_count": _non_negative_int(item.get("fail_count")),
         "last_used_at": last_used_at,
         "tags": list(dict.fromkeys(_clean_text(value) for value in tags if _clean_text(value))),
+        "refresh_status": _clean_text(item.get("refresh_status")).lower(),
+        "refresh_at": refresh_at,
+        "refresh_error": _clean_text(item.get("refresh_error"))[:300],
     }
 
 

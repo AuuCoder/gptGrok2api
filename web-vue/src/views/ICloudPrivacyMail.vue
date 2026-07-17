@@ -255,7 +255,11 @@ let schedulerTimer: number | undefined
 
 const bridgeTone = computed(() => bridge.value?.reachable ? 'success' : bridge.value ? 'danger' : 'muted')
 const bridgeLabel = computed(() => bridge.value?.reachable ? '模块在线' : bridge.value ? '模块离线' : '检查中')
-const pageErrorTitle = computed(() => pageError.value.includes('未保存 iCloud 登录态') ? '尚未完成 Apple 登录' : 'iCloud 模块暂不可用')
+const pageErrorTitle = computed(() => {
+  if (pageError.value.includes('未保存 iCloud 登录态')) return '尚未完成 Apple 登录'
+  if (/Apple (?:协议|服务|登录)/i.test(pageError.value)) return 'Apple 登录暂时失败'
+  return 'iCloud 模块暂不可用'
+})
 const schedulerTone = computed(() => scheduler.value?.running ? 'success' : scheduler.value?.last_error ? 'danger' : 'muted')
 const schedulerLabel = computed(() => scheduler.value?.running ? '运行中' : scheduler.value?.last_error ? '已停止 / 有错误' : '未运行')
 const schedulerEvents = computed(() => scheduler.value?.events || [])

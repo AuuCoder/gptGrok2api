@@ -320,3 +320,5 @@ uv run --with pytest --with pytest-asyncio python -m pytest -q
 - `GROK2API_LICENSE`
 
 许可证和来源声明必须随分发内容保留。运行时、版本检查、安装地址和容器发布均使用 GPTGrok2API 自有仓库与服务。
+
+本项目基于 [yukkcat/chatgpt2api](https://github.com/yukkcat/chatgpt2api) 二开。

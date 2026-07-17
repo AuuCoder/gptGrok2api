@@ -48,9 +48,9 @@
 
     <RuntimeLogPanel
       class="register-runtime-log"
-      title="实时日志"
+      :title="target === 'grok' ? '注册进度' : '实时日志'"
       :lines="activeLogLines"
-      :empty-title="activeLog === 'checkout' ? '暂无提链日志' : '暂无注册日志'"
+      :empty-title="activeLog === 'checkout' ? '暂无提链日志' : target === 'grok' ? '暂无注册进度' : '暂无注册日志'"
       min-height="20rem"
       max-height="min(58vh, 38rem)"
     >

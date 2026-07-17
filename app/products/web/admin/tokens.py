@@ -149,6 +149,9 @@ def _serialize_record(r) -> dict:
         "fail_count":  r.usage_fail_count or 0,
         "last_used_at": r.last_use_at,
         "tags":        r.tags or [],
+        "refresh_status": str(r.ext.get("refresh_status") or ""),
+        "refresh_at": r.ext.get("refresh_at"),
+        "refresh_error": str(r.ext.get("refresh_error") or "")[:300],
     }
 
 

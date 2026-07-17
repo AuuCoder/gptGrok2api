@@ -70,6 +70,21 @@ class XaiCliOAuthAccountStoreTest(unittest.TestCase):
         self.assertNotIn("id-secret", encoded)
         self.assertNotIn("top-secret-subject", encoded)
 
+    def test_update_metadata_merges_delivery_results_without_credentials(self) -> None:
+        saved = self.store.upsert(self._payload("person@example.com", "subject-one", "one"))["item"]
+
+        updated = self.store.update_metadata(saved["id"], {
+            "oauth_delivery": {
+                "sub2api": {"status": "success", "target_id": "server-one"},
+            },
+        })
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["metadata"]["oauth_delivery"]["sub2api"]["status"], "success")
+        self.assertNotIn("access-one", repr(updated))
+        raw = self.store.get(saved["id"])
+        self.assertEqual(raw["metadata"]["oauth_delivery"]["sub2api"]["target_id"], "server-one")
+
     def test_subject_deduplicates_refresh_token_rotation_and_preserves_identity(self) -> None:
         first = self.store.upsert(self._payload("first@example.com", "stable-subject", "one"))
         first_created_at = self.store.get(first["item"]["id"])["created_at"]

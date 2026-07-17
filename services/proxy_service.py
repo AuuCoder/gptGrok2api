@@ -1151,13 +1151,15 @@ def test_proxy_list_sample(value: str, *, timeout: float = 10.0) -> dict:
         else _replace_proxy_scheme(normalize_proxy_url(line), detected_scheme)
         for line in lines
     ]
+    normalized_urls = "\n".join(normalized_lines)
     return {
         **successful,
         "error": None,
         "sample_index": sample_index,
         "sample_count": len(lines),
         "attempts": attempts,
-        "normalized_urls": "\n".join(normalized_lines),
+        "normalized_urls": normalized_urls,
+        "normalized_changed": normalized_urls != "\n".join(lines),
     }
 
 

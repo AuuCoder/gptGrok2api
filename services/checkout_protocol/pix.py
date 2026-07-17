@@ -381,7 +381,7 @@ def proxy_key(proxy: str) -> str:
 
 
 _PROXY_COUNTRY_SELECTOR_RE = re.compile(
-    r"(?i)(?P<name>country|region)(?P<separator>[-_=])(?P<value>[a-z]{2}(?:,[a-z]{2})*)"
+    r"(?i)(?P<name>country|region|area)(?P<separator>[-_=])(?P<value>[a-z]{2}(?:,[a-z]{2})*)"
 )
 _STICKY_SESSION_RE = re.compile(
     r"(?i)(?P<prefix>(?:^|[-_])(?:session|sid)[-_])(?P<value>[A-Za-z0-9]+)(?=(?:[-_]|$))"
@@ -1341,6 +1341,48 @@ def raise_if_cloudflare_challenge(response: Any, stage: str) -> None:
         raise RuntimeError(f"cloudflare_challenge: {stage} HTTP 403")
 
 
+def is_proxy_connect_abort(value: object) -> bool:
+    """Return whether a request failed before the proxy tunnel was established."""
+    text = str(value or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "proxy connect aborted",
+            "connect tunnel failed",
+            "could not connect to proxy",
+            "failed to connect to proxy",
+        )
+    )
+
+
+def request_with_proxy_connect_retry(
+    session: Any,
+    method: str,
+    url: str,
+    *,
+    stage: str,
+    attempts: int | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Retry a pre-request proxy tunnel abort on the same sticky session."""
+    max_attempts = max(
+        1,
+        attempts
+        if attempts is not None
+        else env_int("PIX_PROXY_CONNECT_RETRY_MAX", 3),
+    )
+    sender = getattr(session, str(method or "").strip().lower())
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return sender(url, **kwargs)
+        except Exception as exc:
+            if attempt >= max_attempts or not is_proxy_connect_abort(exc):
+                raise
+            log(f"{stage} 代理隧道瞬时中断，同一 sticky 出口重试 {attempt}/{max_attempts - 1}", "[WARN] ")
+            time.sleep(min(0.5 * attempt, 1.5))
+    raise RuntimeError(f"{stage} 代理连接失败")
+
+
 def checkout_response_has_promo(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -1386,8 +1428,11 @@ def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
         "x-openai-target-path": "/backend-api/payments/checkout",
         "x-openai-target-route": "/backend-api/payments/checkout",
     }
-    resp = chatgpt.post(
+    resp = request_with_proxy_connect_retry(
+        chatgpt,
+        "post",
         "https://chatgpt.com/backend-api/payments/checkout",
+        stage="Checkout bootstrap",
         json=body,
         headers=headers,
         timeout=CHATGPT_TIMEOUT,
@@ -4335,6 +4380,10 @@ def generate_standalone_pix_link(
             "pay_amount": amount_minor / 100,
             "is_free_trial": amount_minor == 0,
             "pix_flow": "standalone",
+            "checkout_billing_name": raw.get("checkout_billing_name"),
+            "checkout_billing_email": raw.get("checkout_billing_email"),
+            "checkout_billing_address": raw.get("checkout_billing_address"),
+            "checkout_billing_tax_id": raw.get("checkout_billing_tax_id"),
             "debug": "core=standalone",
         }
     except Exception as exc:

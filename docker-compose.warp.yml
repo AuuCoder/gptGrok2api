@@ -92,6 +92,8 @@ services:
     image: ${ICLOUD_PRIVACY_MAIL_IMAGE:-chatgpt2api/icloud-privacy-mail:2026.07.14.1}
     container_name: chatgpt2api-icloud-privacy-mail
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ICLOUD_PRIVACY_MAIL_PORT:-8788}:8787"
     depends_on:
       privoxy:
         condition: service_healthy
@@ -101,7 +103,7 @@ services:
       IPM_UPDATE_ENABLED: "false"
       HTTP_PROXY: ${ICLOUD_PRIVACY_MAIL_HTTP_PROXY:-http://privoxy:8118}
       HTTPS_PROXY: ${ICLOUD_PRIVACY_MAIL_HTTPS_PROXY:-http://privoxy:8118}
-      NO_PROXY: ${ICLOUD_PRIVACY_MAIL_NO_PROXY:-127.0.0.1,localhost,icloud-privacy-mail}
+      NO_PROXY: ${ICLOUD_PRIVACY_MAIL_NO_PROXY:-127.0.0.1,localhost,icloud-privacy-mail,.apple.com,.icloud.com,.apple.com.cn,.icloud.com.cn}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./data/icloud-privacy-mail:/data

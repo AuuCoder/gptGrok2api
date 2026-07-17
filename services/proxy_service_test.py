@@ -61,6 +61,7 @@ class ProxyUrlNormalizationTest(unittest.TestCase):
         self.assertEqual(result["scheme"], "http")
         self.assertEqual(result["sample_index"], 1)
         self.assertEqual(result["sample_count"], 2)
+        self.assertTrue(result["normalized_changed"])
         self.assertEqual(
             result["normalized_urls"].splitlines(),
             [
@@ -82,6 +83,7 @@ class ProxyUrlNormalizationTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["scheme"], "socks5h")
+        self.assertFalse(result["normalized_changed"])
         test.assert_called_once_with(
             "socks5h://user:password@proxy.example:1080",
             timeout=10.0,

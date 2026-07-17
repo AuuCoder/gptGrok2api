@@ -11,8 +11,8 @@
         <Button size="sm" variant="outline" :disabled="busy || loading" @click="loadAccounts">
           {{ loading ? '刷新中...' : '刷新' }}
         </Button>
-        <Button size="sm" variant="outline" :disabled="busy || !availableModels.length" @click="openModelTest">
-          测试模型
+        <Button size="sm" variant="outline" :disabled="busy || loading || !accounts.length" @click="openModelTest">
+          账号测试
         </Button>
         <Button size="sm" variant="outline" :disabled="busy" @click="showImport = !showImport">
           导入凭据
@@ -32,6 +32,14 @@
         </div>
         <p class="text-xs text-muted-foreground">{{ protocolJob.message }}</p>
         <p v-if="protocolJob.error" class="break-words text-xs text-rose-600">{{ protocolJob.error }}</p>
+        <div v-if="protocolDeliveryItems.length" class="grid gap-1 border-t border-border pt-2">
+          <div v-for="item in protocolDeliveryItems" :key="item.target" class="flex min-w-0 items-center justify-between gap-3 text-xs">
+            <span class="truncate text-muted-foreground">{{ item.label }}</span>
+            <StateBadge :tone="item.status === 'success' ? 'success' : 'danger'" size="xs">
+              {{ item.status === 'success' ? '已上传' : '上传失败' }}
+            </StateBadge>
+          </div>
+        </div>
       </SurfaceBox>
 
       <SurfaceBox v-if="device" tone="muted" density="compact" class="space-y-3">
@@ -71,6 +79,23 @@
       </SurfaceBox>
 
       <SurfaceBox v-if="showModelTest" tone="muted" density="compact" class="space-y-3">
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div class="text-xs">
+            <span class="ui-field-label">测试范围</span>
+            <ConsoleSegmentedTabs v-model="testScope" :options="testScopeOptions" aria-label="OAuth 账号测试范围" />
+          </div>
+          <div v-if="testScope === 'single'" class="text-xs">
+            <span class="ui-field-label">指定账号</span>
+            <GroupedSelectMenu
+              v-model="testAccountId"
+              :options="accountTestOptions"
+              placeholder="选择 OAuth 账号"
+              selected-indicator="none"
+              aria-label="指定 OAuth 测试账号"
+              block
+            />
+          </div>
+        </div>
         <div class="grid grid-cols-1 gap-3 md:grid-cols-[minmax(12rem,0.35fr)_1fr]">
           <div class="text-xs">
             <span class="ui-field-label">模型</span>
@@ -89,17 +114,33 @@
           </label>
         </div>
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <p v-if="testElapsedMs !== null" class="text-xs text-muted-foreground">耗时 {{ (testElapsedMs / 1000).toFixed(1) }}s</p>
+          <p v-if="testTotal" class="text-xs text-muted-foreground">
+            已完成 {{ testCompleted }} / {{ testTotal }} · 成功 {{ testSuccessCount }} · 失败 {{ testFailureCount }}
+          </p>
           <span v-else></span>
           <div class="flex gap-2">
             <Button size="xs" variant="outline" :disabled="busy" @click="closeModelTest">收起</Button>
-            <Button size="xs" variant="primary" :disabled="busy || !testModel || !testPrompt" @click="runModelTest">
-              {{ busy ? '测试中...' : '开始测试' }}
+            <Button size="xs" variant="primary" :disabled="busy || !canRunModelTest" @click="runModelTest">
+              {{ testRunning ? `测试中 ${testCompleted}/${testTotal}` : testScope === 'all' ? '测试全部账号' : '测试指定账号' }}
             </Button>
           </div>
         </div>
-        <p v-if="testError" class="text-xs text-rose-600">{{ testError }}</p>
-        <pre v-else-if="testResult" class="max-h-52 overflow-auto whitespace-pre-wrap break-words border-t border-border pt-3 text-sm text-foreground">{{ testResult }}</pre>
+        <div v-if="testResults.length" class="max-h-72 divide-y divide-border overflow-auto border-t border-border">
+          <div v-for="item in testResults" :key="item.accountId" class="space-y-1 py-2.5">
+            <div class="flex min-w-0 items-center justify-between gap-3">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-medium text-foreground" :title="item.label">{{ item.label }}</p>
+                <p class="truncate font-mono text-[11px] text-muted-foreground" :title="item.accountId">{{ item.accountId }}</p>
+              </div>
+              <div class="flex shrink-0 items-center gap-2">
+                <span v-if="item.elapsedMs !== null" class="text-[11px] text-muted-foreground">{{ (item.elapsedMs / 1000).toFixed(1) }}s</span>
+                <StateBadge :tone="testResultTone(item.status)" size="xs">{{ testResultStatusLabel(item.status) }}</StateBadge>
+              </div>
+            </div>
+            <p v-if="item.error" class="break-words text-xs text-rose-600">{{ item.error }}</p>
+            <p v-else-if="item.content" class="break-words text-xs text-foreground">{{ item.content }}</p>
+          </div>
+        </div>
       </SurfaceBox>
     </ModalBody>
     <ModalFooter>
@@ -118,7 +159,7 @@ import {
   type GrokOAuthDeviceSession,
   type GrokOAuthProtocolJob,
 } from '@/api/grokOAuthAccounts'
-import { streamChatCompletion } from '@/api/chatStream'
+import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
@@ -148,13 +189,43 @@ const refreshToken = ref('')
 const showModelTest = ref(false)
 const testModel = ref('')
 const testPrompt = ref('你好，请只回复 OK。')
-const testResult = ref('')
-const testError = ref('')
-const testElapsedMs = ref<number | null>(null)
+const testScope = ref<'all' | 'single'>('all')
+const testAccountId = ref('')
+const testRunning = ref(false)
+const testCompleted = ref(0)
+const testTotal = ref(0)
+type OAuthAccountTestStatus = 'pending' | 'success' | 'failed'
+type OAuthAccountTestItem = {
+  accountId: string
+  label: string
+  status: OAuthAccountTestStatus
+  elapsedMs: number | null
+  content: string
+  error: string
+}
+const testResults = ref<OAuthAccountTestItem[]>([])
 let protocolPollTimer: number | null = null
 
 const hasImportValue = computed(() => Boolean(credentialText.value || (accessToken.value && refreshToken.value)))
-const modelTestOptions = computed(() => availableModels.value.map((model) => ({ label: model, value: model })))
+const testScopeOptions = [
+  { label: '全部账号', value: 'all' },
+  { label: '指定账号', value: 'single' },
+]
+const modelTestOptions = computed(() => Array.from(new Set([
+  ...availableModels.value,
+  ...accounts.value.flatMap((account) => account.models || []),
+])).map((model) => ({ label: model, value: model })))
+const accountTestOptions = computed(() => accounts.value.map((account) => ({
+  label: `${account.email || account.subject_preview || account.id} · ${account.status}`,
+  value: account.id,
+})))
+const canRunModelTest = computed(() => Boolean(
+  testModel.value
+  && testPrompt.value.trim()
+  && (testScope.value === 'all' ? accounts.value.length : testAccountId.value),
+))
+const testSuccessCount = computed(() => testResults.value.filter((item) => item.status === 'success').length)
+const testFailureCount = computed(() => testResults.value.filter((item) => item.status === 'failed').length)
 const protocolRunning = computed(() => ['pending', 'running'].includes(protocolJob.value?.status || ''))
 const protocolJobTone = computed(() => {
   if (protocolJob.value?.status === 'authorized') return 'success'
@@ -179,9 +250,17 @@ const protocolStageLabel = computed(() => ({
   approve: '确认 Allow',
   token: '获取 OAuth token',
   models: '探测模型',
+  delivery: '投递 OAuth 凭据',
   completed: '完成',
   failed: '失败',
 }[protocolJob.value?.stage || 'queued'] || protocolJob.value?.stage || '排队'))
+const protocolDeliveryItems = computed(() => Object.entries(protocolJob.value?.delivery || {})
+  .filter(([, result]) => result?.status === 'success' || result?.status === 'failed')
+  .map(([target, result]) => ({
+    target,
+    label: target === 'sub2api' ? 'Sub2API' : target === 'cpa' ? 'CPA' : '外部投递',
+    status: result.status,
+  })))
 
 async function loadAccounts() {
   loading.value = true
@@ -189,7 +268,11 @@ async function loadAccounts() {
     const result = await grokOAuthAccountsApi.list()
     accounts.value = result.items || []
     availableModels.value = result.available_models || []
-    if (!availableModels.value.includes(testModel.value)) testModel.value = availableModels.value[0] || ''
+    const modelIds = modelTestOptions.value.map((option) => option.value)
+    if (!modelIds.includes(testModel.value)) testModel.value = modelIds[0] || ''
+    if (!accounts.value.some((account) => account.id === testAccountId.value)) {
+      testAccountId.value = accounts.value[0]?.id || ''
+    }
   } catch (error) {
     toast.error(error instanceof Error ? error.message : 'OAuth 账号加载失败')
   } finally {
@@ -198,43 +281,90 @@ async function loadAccounts() {
 }
 
 function openModelTest() {
-  if (!testModel.value) testModel.value = availableModels.value[0] || ''
+  if (!testModel.value) testModel.value = modelTestOptions.value[0]?.value || ''
+  if (!testAccountId.value) testAccountId.value = accounts.value[0]?.id || ''
   showModelTest.value = true
 }
 
 function closeModelTest() {
   showModelTest.value = false
-  testResult.value = ''
-  testError.value = ''
-  testElapsedMs.value = null
+  testResults.value = []
+  testCompleted.value = 0
+  testTotal.value = 0
 }
 
 async function runModelTest() {
   const model = testModel.value.trim()
   const prompt = testPrompt.value.trim()
-  if (!model || !prompt) return
+  const targets = testScope.value === 'all'
+    ? [...accounts.value]
+    : accounts.value.filter((account) => account.id === testAccountId.value)
+  if (!model || !prompt || !targets.length) return
 
   busy.value = true
-  testResult.value = ''
-  testError.value = ''
-  testElapsedMs.value = null
-  const startedAt = performance.now()
+  testRunning.value = true
+  testCompleted.value = 0
+  testTotal.value = targets.length
+  testResults.value = targets.map((account) => ({
+    accountId: account.id,
+    label: account.email || account.subject_preview || account.id,
+    status: 'pending',
+    elapsedMs: null,
+    content: '',
+    error: '',
+  }))
+  let nextIndex = 0
   try {
-    const result = await streamChatCompletion({
-      model,
-      messages: [{ role: 'user', content: prompt }],
-      onDelta: (delta) => { testResult.value += delta },
-    })
-    if (!testResult.value) testResult.value = result.content
-    testElapsedMs.value = Math.round(performance.now() - startedAt)
-    toast.success(`${model} 测试成功`)
+    const worker = async () => {
+      while (nextIndex < targets.length) {
+        const index = nextIndex
+        nextIndex += 1
+        const account = targets[index]
+        const startedAt = performance.now()
+        try {
+          const result = await grokOAuthAccountsApi.testAccount(account.id, { model, prompt })
+          testResults.value[index] = {
+            ...testResults.value[index],
+            status: 'success',
+            elapsedMs: result.elapsed_ms,
+            content: result.content,
+          }
+        } catch (error) {
+          testResults.value[index] = {
+            ...testResults.value[index],
+            status: 'failed',
+            elapsedMs: Math.round(performance.now() - startedAt),
+            error: errorMessage(error, '账号测试失败'),
+          }
+        } finally {
+          testCompleted.value += 1
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()))
+    if (testFailureCount.value) {
+      toast.warning(`账号测试完成：成功 ${testSuccessCount.value}，失败 ${testFailureCount.value}`)
+    } else {
+      toast.success(`账号测试完成：${testSuccessCount.value} 个账号全部可用`)
+    }
     await loadAccounts()
-  } catch (error) {
-    testElapsedMs.value = Math.round(performance.now() - startedAt)
-    testError.value = errorMessage(error, '模型测试失败')
+    emit('changed')
   } finally {
+    testRunning.value = false
     busy.value = false
   }
+}
+
+function testResultTone(status: OAuthAccountTestStatus) {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function testResultStatusLabel(status: OAuthAccountTestStatus) {
+  if (status === 'success') return '可用'
+  if (status === 'failed') return '失败'
+  return '等待'
 }
 
 async function startDeviceAuthorization() {

@@ -9,7 +9,7 @@ export type GrokAccountStatus =
   | 'submission_failed'
   | 'submission_unknown'
   | 'submission_unconfirmed'
-export type GrokAccountStatusFilter = 'all' | GrokAccountStatus | 'normal' | 'limited' | 'abnormal' | 'disabled'
+export type GrokAccountStatusFilter = 'all' | GrokAccountStatus | 'normal' | 'limited' | 'abnormal' | 'disabled' | 'refresh_failed'
 export type GrokAccountExportFormat = 'json' | 'txt'
 export type GrokAccountSyncState =
   | 'synced'
@@ -63,6 +63,9 @@ export type GrokAccount = {
   use_count?: number
   fail_count?: number
   last_used_at?: string | number | null
+  refresh_status?: 'success' | 'failed' | (string & {})
+  refresh_at?: string | number | null
+  refresh_error?: string
   tags?: string[]
   sync_state?: GrokAccountSyncState
   oauth?: GrokOAuthAccount | null
@@ -118,6 +121,12 @@ export type GrokAccountsDisabledResponse = {
 
 export type GrokAccountsRuntimeResponse = {
   summary: GrokAccountsMutationSummary
+  results?: Array<{
+    id: string
+    ok: boolean
+    refresh_status?: 'success' | 'failed' | string
+    error?: string
+  }>
   error?: string
 }
 
@@ -160,6 +169,8 @@ export type GrokAccountChatTestResponse = {
 export type GrokAccountsBatchChatTestSummary = {
   total: number
   success: number
+  blocked: number
+  invalid: number
   limited: number
   permission: number
   failed: number

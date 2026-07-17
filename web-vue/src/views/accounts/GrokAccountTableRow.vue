@@ -38,7 +38,11 @@
       <StatusPill
         :label="grokRuntimeStatusText(item)"
         :tone-class="`${grokRuntimeStatusClass(item)} border-border`"
+        :title="grokRefreshStatusTitle(item)"
       />
+      <p v-if="grokRefreshFailed(item)" class="mt-1 max-w-[12rem] truncate text-xs text-amber-600" :title="grokRefreshStatusTitle(item)">
+        {{ item.refresh_error || '上游未返回真实额度数据' }}
+      </p>
     </td>
     <td class="max-w-[18rem] py-4 pr-5 align-middle font-mono text-xs text-muted-foreground">
       <span class="whitespace-normal leading-5">{{ grokQuotaText(item) }}</span>
@@ -103,6 +107,8 @@ import {
   grokAccountStatusText,
   grokAccountTokenPreview,
   grokQuotaText,
+  grokRefreshFailed,
+  grokRefreshStatusTitle,
   grokOAuthStatusClass,
   grokOAuthStatusText,
   grokRuntimeStatusClass,

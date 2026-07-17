@@ -201,9 +201,11 @@ class Grok2APIAccountClient:
             self._require_ready()
             from services.grok_runtime import grok_runtime
 
+            batches = max(1, (len(normalized) + 14) // 15)
+            timeout = min(300, max(self.timeout, 30 * batches))
             return grok_runtime.run_sync(
                 lambda: grok_runtime.refresh_accounts(normalized),
-                timeout=self.timeout,
+                timeout=timeout,
             )
         return self._request(
             "POST",

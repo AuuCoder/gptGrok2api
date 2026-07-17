@@ -54,12 +54,7 @@ account_result_sink: Callable[[dict[str, Any]], None] | None = None
 _print_lock = threading.Lock()
 
 
-def log(text: str, color: str = "") -> None:
-    if register_log_sink:
-        try:
-            register_log_sink(str(text), str(color or ""))
-        except Exception:
-            pass
+def _write_console(text: str, color: str = "") -> None:
     colors = {"red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m"}
     with _print_lock:
         prefix = colors.get(color, "")
@@ -67,8 +62,27 @@ def log(text: str, color: str = "") -> None:
         print(f"{prefix}{beijing_now_str(TIME_FORMAT)} {text}{suffix}")
 
 
+def log(text: str, color: str = "") -> None:
+    if register_log_sink:
+        try:
+            register_log_sink(str(text), str(color or ""))
+        except Exception:
+            pass
+    _write_console(text, color)
+
+
 def step(index: int, text: str, color: str = "") -> None:
     log(f"[任务{index}] {text}", color)
+
+
+def debug_step(index: int, text: str, color: str = "") -> None:
+    """Keep protocol diagnostics in the server console, outside the user progress feed."""
+    _write_console(f"[任务{index}] {text}", color)
+
+
+def _short_error(error: Exception, limit: int = 180) -> str:
+    text = " ".join(str(error or type(error).__name__).split()) or type(error).__name__
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
 def _persist_account_snapshot(payload: dict[str, Any]) -> bool:
@@ -164,38 +178,30 @@ def _register_once(
     attempt: int,
     max_attempts: int,
 ) -> dict[str, Any]:
-    suffix = f"（邮箱尝试 {attempt}/{max_attempts}）" if max_attempts > 1 else ""
-    step(index, f"开始创建邮箱{suffix}")
+    suffix = f"（第 {attempt}/{max_attempts} 次）" if max_attempts > 1 else ""
+    step(index, f"获取注册邮箱{suffix}")
     mailbox = mail_provider.create_mailbox(mail_config)
     email = str(mailbox.get("address") or "").strip()
     if not email:
         mail_provider.release_mailbox(mailbox)
         raise GrokProtocolError("邮箱服务未返回 address", stage="mail", mail_retryable=True)
-    label = str(mailbox.get("label") or mailbox.get("provider") or "")
-    step(index, f"邮箱创建完成[{label}]: {email}")
-
     mailbox_finalized = False
     draft: dict[str, Any] | None = None
     try:
         mailbox["_received_after"] = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-        step(index, "正在初始化 Grok 注册协议")
         client.bootstrap()
-        step(index, "正在发送 Grok 验证码")
         client.send_email_validation_code(email)
-        step(index, "开始等待 Grok 验证码")
+        step(index, "验证码已发送，等待邮件")
         code = mail_provider.wait_for_code(mail_config, mailbox)
         if not code:
             raise GrokProtocolError("等待 Grok 验证码超时", stage="mail", mail_retryable=True)
         code_text = str(code)
-        step(index, f"已收到 Grok 验证码: {code_text}")
         normalized_code = code_text.strip()
-        step(index, "正在校验 Grok 验证码")
         client.verify_email_validation_code(email, normalized_code)
-        step(index, "Grok 验证码校验通过")
+        step(index, "邮箱验证完成，正在进行安全校验")
 
         given_name, family_name = _random_name()
         password = _random_password()
-        step(index, "正在求解 Turnstile")
         turnstile_token = client.solve_turnstile()
         draft = {
             "email": email,
@@ -211,7 +217,7 @@ def _register_once(
             "status": "submitting",
         }
         _persist_account_snapshot(draft)
-        step(index, "正在提交 Grok 注册")
+        step(index, "安全校验完成，正在创建账号")
         try:
             account = client.create_user_and_session(
                 email=email,
@@ -269,30 +275,31 @@ def _register_once(
 
 def worker(index: int) -> dict[str, Any]:
     started = time.monotonic()
-    proxy, proxy_source = _resolve_register_proxy(str(config.get("proxy") or "").strip())
-    grok_config = copy.deepcopy(config.get("grok") if isinstance(config.get("grok"), dict) else {})
-    mail_config = _mail_config(proxy)
-    max_attempts = _max_mail_retries(grok_config)
-    client = GrokProtocolClient(grok_config, proxy=proxy, log=lambda message: step(index, message))
+    client: GrokProtocolClient | None = None
     last_error: Exception | None = None
     try:
-        step(index, "任务启动")
-        step(index, f"注册网络出口: {proxy_source}")
+        step(index, "准备注册环境")
+        proxy, proxy_source = _resolve_register_proxy(str(config.get("proxy") or "").strip())
+        debug_step(index, f"注册网络出口: {proxy_source}")
+        grok_config = copy.deepcopy(config.get("grok") if isinstance(config.get("grok"), dict) else {})
+        mail_config = _mail_config(proxy)
+        max_attempts = _max_mail_retries(grok_config)
+        client = GrokProtocolClient(grok_config, proxy=proxy, log=lambda message: debug_step(index, message))
         for attempt in range(1, max_attempts + 1):
             try:
                 result = _register_once(index, client, mail_config, attempt, max_attempts)
                 elapsed = time.monotonic() - started
-                log(f"{result['email']} Grok 注册成功，本次耗时{elapsed:.1f}s", "green")
+                step(index, f"注册成功（{elapsed:.1f} 秒）", "green")
                 return {"ok": True, "index": index, "result": result}
             except Exception as error:
                 last_error = error
                 if attempt >= max_attempts or not _mail_retryable(error):
                     raise
-                step(index, f"当前邮箱不可用，准备更换邮箱: {error}", "yellow")
+                step(index, f"邮箱不可用，正在更换（下一次 {attempt + 1}/{max_attempts}）", "yellow")
         raise last_error or RuntimeError("Grok 注册失败")
     except Exception as error:
         elapsed = time.monotonic() - started
-        log(f"任务{index} Grok 注册失败，本次耗时{elapsed:.1f}s，原因: {error}", "red")
+        step(index, f"注册失败（{elapsed:.1f} 秒）：{_short_error(error)}", "red")
         result = {"ok": False, "index": index, "error": str(error)}
         partial = getattr(error, "partial_result", None)
         if isinstance(partial, dict) and partial:
@@ -300,7 +307,8 @@ def worker(index: int) -> dict[str, Any]:
             result["account_persisted"] = bool(getattr(error, "partial_persisted", False))
         return result
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 __all__ = ["account_result_sink", "config", "log", "register_log_sink", "step", "worker"]

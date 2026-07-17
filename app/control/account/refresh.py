@@ -251,7 +251,7 @@ class AccountRefreshService:
         concurrency = get_config("account.refresh.usage_concurrency", 15)
         results = await run_batch(
             records,
-            lambda r: self._refresh_one(r, bootstrap=True),
+            lambda r: self._refresh_one(r, bootstrap=True, track_result=True),
             concurrency=concurrency,
         )
         agg = RefreshResult()
@@ -331,6 +331,7 @@ class AccountRefreshService:
         *,
         apply_fallback: bool = False,
         bootstrap: bool = False,
+        track_result: bool = False,
     ) -> RefreshResult:
         """Fetch all pool-supported modes from the usage API and persist them.
 
@@ -354,6 +355,12 @@ class AccountRefreshService:
         # API call completely failed — no real data available.
         if windows is None:
             if not apply_fallback:
+                if track_result:
+                    await self._record_refresh_result(
+                        record,
+                        status="failed",
+                        error="上游未返回真实额度数据",
+                    )
                 return RefreshResult(checked=1, failed=1)
             # Scheduled/import path: apply conservative fallback.
             return await self._apply_fallback(record)
@@ -423,6 +430,12 @@ class AccountRefreshService:
                     ).to_dict()
 
         if not patches:
+            if track_result:
+                await self._record_refresh_result(
+                    record,
+                    status="failed",
+                    error="上游响应未包含可用额度数据",
+                )
             return RefreshResult(checked=1, failed=0 if refreshed else 1)
 
         # Infer pool type from live quota data and patch if it changed.
@@ -444,6 +457,15 @@ class AccountRefreshService:
                     pool=pool_patch,
                     last_sync_at=now_ms() if refreshed else None,
                     usage_sync_delta=1 if refreshed else None,
+                    ext_merge=(
+                        {
+                            "refresh_status": "success",
+                            "refresh_at": now,
+                            "refresh_error": "",
+                        }
+                        if track_result and refreshed
+                        else None
+                    ),
                     **patches,  # type: ignore[arg-type]
                 )
             ]
@@ -454,6 +476,28 @@ class AccountRefreshService:
             refreshed=1 if refreshed else 0,
             failed=0 if refreshed else 1,
             recovered=1 if (was_cooling and refreshed) else 0,
+        )
+
+    async def _record_refresh_result(
+        self,
+        record: AccountRecord,
+        *,
+        status: str,
+        error: str = "",
+    ) -> None:
+        from .commands import AccountPatch
+
+        await self._repo.patch_accounts(
+            [
+                AccountPatch(
+                    token=record.token,
+                    ext_merge={
+                        "refresh_status": str(status or "").strip(),
+                        "refresh_at": now_ms(),
+                        "refresh_error": str(error or "").strip()[:300],
+                    },
+                )
+            ]
         )
 
     async def _apply_fallback(self, record: AccountRecord) -> RefreshResult:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -206,6 +208,82 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
     if not access_token:
         return None, "missing access_token"
     return access_token, None
+
+
+class CPAUploadError(RuntimeError):
+    """A credential-free error raised while uploading one CPA auth file."""
+
+
+def _xai_auth_file_name(account: dict) -> str:
+    identity = str(account.get("email") or account.get("subject") or "oauth").strip()
+    safe_identity = re.sub(r"[^A-Za-z0-9@._-]+", "-", identity).strip("-._")[:120] or "oauth"
+    return f"xai-{safe_identity}.json"
+
+
+def _xai_auth_file_payload(account: dict) -> dict:
+    access_token = str(account.get("access_token") or "").strip()
+    refresh_token = str(account.get("refresh_token") or "").strip()
+    if not access_token or not refresh_token:
+        raise CPAUploadError("本地 xAI 账号缺少 OAuth 凭据，无法上传")
+    payload = {
+        "type": "xai",
+        "auth_kind": "oauth",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": str(account.get("token_type") or "Bearer").strip() or "Bearer",
+        "last_refresh": str(account.get("last_refresh_at") or _now_iso()).strip(),
+    }
+    for source_key, target_key in (
+        ("id_token", "id_token"),
+        ("email", "email"),
+        ("subject", "sub"),
+        ("expires_at", "expired"),
+    ):
+        value = str(account.get(source_key) or "").strip()
+        if value:
+            payload[target_key] = value
+    return payload
+
+
+def upload_xai_oauth_file(pool: dict, account: dict) -> dict:
+    """Upload one xAI OAuth JSON file through CLIProxyAPI's management API."""
+    pool_id = str(pool.get("id") or "").strip()
+    base_url = str(pool.get("base_url") or "").strip()
+    secret_key = str(pool.get("secret_key") or "").strip()
+    if not pool_id or not base_url or not secret_key:
+        raise CPAUploadError("CPA 连接不完整，请重新保存连接")
+
+    file_name = _xai_auth_file_name(account)
+    payload = _xai_auth_file_payload(account)
+    session = Session(**proxy_settings.build_session_kwargs(verify=True))
+    try:
+        response = session.post(
+            f"{base_url.rstrip('/')}/v0/management/auth-files",
+            headers=_management_headers(secret_key),
+            files={
+                "file": (
+                    file_name,
+                    json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    "application/json",
+                )
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            raise CPAUploadError(f"CPA 上传 xAI OAuth 文件失败（HTTP {response.status_code}）")
+    except CPAUploadError:
+        raise
+    except Exception as exc:
+        raise CPAUploadError("CPA 上传 xAI OAuth 文件请求失败") from exc
+    finally:
+        session.close()
+
+    return {
+        "ok": True,
+        "pool_id": pool_id,
+        "pool_name": str(pool.get("name") or "").strip() or base_url,
+        "file_name": file_name,
+    }
 
 
 class CPAImportService:
