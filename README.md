@@ -312,6 +312,10 @@ python3 -m compileall -q api app services utils
 uv run --with pytest --with pytest-asyncio python -m pytest -q
 ```
 
+## 社区支持
+
+学技术，了解 AI，上 L 站：[LinuxDO](https://linux.do/)
+
 ## 许可证
 
 项目中的自有修改与继承代码分别受仓库内许可证文件约束：
