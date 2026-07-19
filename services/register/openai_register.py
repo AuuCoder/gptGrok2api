@@ -2887,13 +2887,13 @@ def _enabled_mail_provider_count() -> int:
     )
 
 
-def _register_with_fresh_email(index: int) -> tuple[TraditionalChatGPTRegistrar, dict]:
+def _register_with_fresh_email(index: int) -> tuple[PlatformRegistrar, dict]:
     skipped = 0
     delivery_failures = 0
     excluded_provider_refs: set[str] = set()
     provider_count = max(1, _enabled_mail_provider_count())
     while True:
-        registrar = TraditionalChatGPTRegistrar(config["proxy"])
+        registrar = PlatformRegistrar(config["proxy"])
         registrar.excluded_mail_provider_refs = set(excluded_provider_refs)
         try:
             return registrar, registrar.register(index)
@@ -2931,7 +2931,7 @@ def _register_with_fresh_email(index: int) -> tuple[TraditionalChatGPTRegistrar,
 
 def worker(index: int) -> dict:
     start = time.time()
-    registrar: TraditionalChatGPTRegistrar | None = None
+    registrar: PlatformRegistrar | None = None
     try:
         step(index, "任务启动")
         registrar, result = _register_with_fresh_email(index)

@@ -2019,6 +2019,7 @@ def _is_outlook_transient_fetch_error(error: Exception | str) -> bool:
             "connection aborted",
             "socket error",
             "eof",
+            "authenticated but not connected",
         )
     )
 
@@ -2277,9 +2278,23 @@ class OutlookTokenProvider(BaseMailProvider):
         self.imap_host = str(entry.get("imap_host") or OUTLOOK_DEFAULT_IMAP_HOST).strip() or OUTLOOK_DEFAULT_IMAP_HOST
         self.message_limit = max(1, int(entry.get("message_limit") or 10))
         self.session = _create_session(conf)
+        self._imap_connection: imaplib.IMAP4_SSL | None = None
+        self._imap_mailbox_key = ""
 
     def close(self) -> None:
+        self._close_imap_connection()
         self.session.close()
+
+    def _close_imap_connection(self) -> None:
+        imap = self._imap_connection
+        self._imap_connection = None
+        self._imap_mailbox_key = ""
+        if imap is None:
+            return
+        try:
+            imap.logout()
+        except Exception:
+            pass
 
     def _exchange_refresh_token(self, client_id: str, refresh_token: str, scope: str) -> str:
         max_attempts = 3
@@ -2420,16 +2435,31 @@ class OutlookTokenProvider(BaseMailProvider):
 
     def _imap_messages(self, mailbox: dict[str, Any], access_token: str) -> list[dict[str, Any]]:
         """返回最近 N 封邮件，最新在前。"""
-        auth_string = f"user={mailbox.get('login_email') or mailbox['address']}\x01auth=Bearer {access_token}\x01\x01"
-        imap = imaplib.IMAP4_SSL(
-            self.imap_host,
-            timeout=max(1.0, float(self.conf["request_timeout"])),
-        )
+        login_email = str(mailbox.get("login_email") or mailbox["address"]).strip()
+        mailbox_key = login_email.lower()
+        if self._imap_connection is not None and self._imap_mailbox_key != mailbox_key:
+            self._close_imap_connection()
+        if self._imap_connection is None:
+            auth_string = f"user={login_email}\x01auth=Bearer {access_token}\x01\x01"
+            imap = imaplib.IMAP4_SSL(
+                self.imap_host,
+                timeout=max(1.0, float(self.conf["request_timeout"])),
+            )
+            try:
+                imap.authenticate("XOAUTH2", lambda _: auth_string.encode("utf-8"))
+                status, _ = imap.select("INBOX", readonly=True)
+                if status != "OK":
+                    raise RuntimeError("OutlookToken IMAP select INBOX 失败")
+            except Exception:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+                raise
+            self._imap_connection = imap
+            self._imap_mailbox_key = mailbox_key
+        imap = self._imap_connection
         try:
-            imap.authenticate("XOAUTH2", lambda _: auth_string.encode("utf-8"))
-            status, _ = imap.select("INBOX", readonly=True)
-            if status != "OK":
-                raise RuntimeError("OutlookToken IMAP select INBOX 失败")
             status, data = imap.uid("search", None, "ALL")
             if status != "OK" or not data or not data[0]:
                 return []
@@ -2458,11 +2488,9 @@ class OutlookTokenProvider(BaseMailProvider):
                 if raw_payload:
                     messages.append(self._parse_imap_message(mailbox, raw_payload, internal_received))
             return messages
-        finally:
-            try:
-                imap.logout()
-            except Exception:
-                pass
+        except Exception:
+            self._close_imap_connection()
+            raise
 
     def _parse_imap_message(self, mailbox: dict[str, Any], raw: bytes, internal_received: datetime | None = None) -> dict[str, Any]:
         message = message_from_bytes(raw, policy=policy.default)
@@ -2565,17 +2593,21 @@ class OutlookTokenProvider(BaseMailProvider):
         deadline = time.monotonic() + self.conf["wait_timeout"]
         target_address = str(mailbox.get("address") or "").strip()
         last_transient_error: Exception | None = None
+        transient_failures = 0
         successful_reads = 0
         while time.monotonic() < deadline:
             try:
                 messages = self.fetch_recent_messages(mailbox)
                 successful_reads += 1
                 last_transient_error = None
+                transient_failures = 0
             except Exception as error:
                 if not _is_outlook_transient_fetch_error(error):
                     raise
                 last_transient_error = error
-                time.sleep(max(0.2, self.conf["wait_interval"]))
+                transient_failures += 1
+                base_interval = max(0.2, self.conf["wait_interval"])
+                time.sleep(min(15.0, base_interval * transient_failures))
                 continue
             for message in messages:
                 if _message_before_code_boundary(mailbox, message):

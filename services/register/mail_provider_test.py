@@ -683,6 +683,26 @@ class OutlookTokenProviderTest(unittest.TestCase):
         self.assertEqual(messages, [])
         imap_type.assert_called_once_with("outlook.office365.com", timeout=7.0)
 
+    def test_imap_connection_is_reused_during_mailbox_polling(self) -> None:
+        entry = {**self.entry, "mode": "imap"}
+        with patch.object(mail_provider, "_create_session", return_value=MagicMock()):
+            provider = mail_provider.OutlookTokenProvider(entry, dict(self.conf))
+        mailbox = {"address": "person@outlook.com", "login_email": "person@outlook.com"}
+        imap = MagicMock()
+        imap.authenticate.return_value = ("OK", [])
+        imap.select.return_value = ("OK", [])
+        imap.uid.side_effect = [("OK", [b""]), ("OK", [b""])]
+
+        with patch.object(mail_provider.imaplib, "IMAP4_SSL", return_value=imap) as imap_type:
+            self.assertEqual(provider._imap_messages(mailbox, "access-token"), [])
+            self.assertEqual(provider._imap_messages(mailbox, "access-token"), [])
+            provider.close()
+
+        imap_type.assert_called_once_with("outlook.office365.com", timeout=7.0)
+        imap.authenticate.assert_called_once()
+        self.assertEqual(imap.uid.call_count, 2)
+        imap.logout.assert_called_once()
+
     def test_wait_for_code_retries_a_transient_imap_timeout(self) -> None:
         provider = self._provider()
         mailbox = {"address": "person@outlook.com"}
@@ -704,6 +724,32 @@ class OutlookTokenProviderTest(unittest.TestCase):
             code = provider.wait_for_code(mailbox)
 
         self.assertEqual(code, "654321")
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_wait_for_code_retries_authenticated_but_disconnected_imap_session(self) -> None:
+        provider = self._provider()
+        mailbox = {"address": "person@outlook.com"}
+        message = {
+            "provider": "outlook_token",
+            "mailbox": "person@outlook.com",
+            "message_id": "message-2",
+            "subject": "Your temporary OpenAI verification code",
+            "to": "person@outlook.com",
+            "text_content": "Enter this temporary verification code to continue: 246802",
+            "received_at": datetime.now(timezone.utc),
+        }
+
+        with patch.object(
+            provider,
+            "fetch_recent_messages",
+            side_effect=[
+                mail_provider.imaplib.IMAP4.error("User is authenticated but not connected."),
+                [message],
+            ],
+        ) as fetch:
+            code = provider.wait_for_code(mailbox)
+
+        self.assertEqual(code, "246802")
         self.assertEqual(fetch.call_count, 2)
 
 
