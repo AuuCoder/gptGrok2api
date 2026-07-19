@@ -84,6 +84,17 @@ def _normalize_error_message(value: str) -> str:
     return text or "Update check failed."
 
 
+def _success_cache_ttl(payload: dict[str, Any]) -> float:
+    current_version = str(payload.get("current_version") or "")
+    latest_version = str(payload.get("latest_version") or "")
+    changelog = str(payload.get("changelog") or "")
+    release_pending = _is_newer(current_version, latest_version)
+    has_unreleased_notes = bool(re.search(r"^##\s+Unreleased\s*$", changelog, re.MULTILINE))
+    if release_pending or has_unreleased_notes:
+        return _ERROR_TTL_SECONDS
+    return _CACHE_TTL_SECONDS
+
+
 def _build_payload(release: dict[str, Any] | None = None, error: str = "") -> dict[str, Any]:
     current_version = get_project_version()
     release = release or {}
@@ -171,7 +182,7 @@ async def get_latest_release_info(force: bool = False) -> dict[str, Any]:
         try:
             release = await _fetch_latest_release()
             payload = _build_payload(release=release)
-            ttl = _CACHE_TTL_SECONDS
+            ttl = _success_cache_ttl(payload)
         except Exception as exc:
             payload = _build_payload(error=str(exc))
             ttl = _ERROR_TTL_SECONDS

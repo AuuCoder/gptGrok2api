@@ -36,6 +36,33 @@ class UpdateCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["changelog"], release["changelog"])
         self.assertTrue(payload["update_available"])
 
+    def test_success_cache_uses_short_ttl_while_release_is_pending(self):
+        payload = {
+            "current_version": "1.0.4",
+            "latest_version": "1.0.3",
+            "changelog": "# Changelog\n\n## 1.0.3 - 2026-07-18\n",
+        }
+
+        self.assertEqual(update_check._success_cache_ttl(payload), update_check._ERROR_TTL_SECONDS)
+
+    def test_success_cache_uses_short_ttl_for_unreleased_changelog(self):
+        payload = {
+            "current_version": "1.0.4",
+            "latest_version": "1.0.4",
+            "changelog": "# Changelog\n\n## Unreleased\n",
+        }
+
+        self.assertEqual(update_check._success_cache_ttl(payload), update_check._ERROR_TTL_SECONDS)
+
+    def test_success_cache_uses_normal_ttl_for_published_release(self):
+        payload = {
+            "current_version": "1.0.4",
+            "latest_version": "1.0.4",
+            "changelog": "# Changelog\n\n## 1.0.4 - 2026-07-19\n",
+        }
+
+        self.assertEqual(update_check._success_cache_ttl(payload), update_check._CACHE_TTL_SECONDS)
+
     async def test_fetch_latest_release_combines_github_release_and_changelog(self):
         releases = [
             {"tag_name": "v1.0.2", "draft": False},
