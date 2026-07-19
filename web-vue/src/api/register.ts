@@ -149,6 +149,13 @@ export type OpenAISub2APISyncConfig = {
   group_name: string
 }
 
+export type OpenAICPASyncConfig = {
+  /** Whether newly registered OpenAI accounts should be uploaded to the selected CPA server. */
+  enabled: boolean
+  /** Saved CPA connection ID. */
+  pool_id: string
+}
+
 /** One Checkout extraction attempt reported by the registration runtime. */
 export type CheckoutTask = {
   task_id?: string
@@ -175,6 +182,7 @@ export type LegacyRegisterConfig = {
   grok: GrokRegisterConfig
   checkout: OpenAICheckoutConfig
   sub2api_sync: OpenAISub2APISyncConfig
+  cpa_sync: OpenAICPASyncConfig
   mail: {
     request_timeout?: number
     wait_timeout?: number

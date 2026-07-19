@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from services.cpa_service import normalize_cpa_delivery_config
 from services.json_file import read_json_object, write_json_file
 from services.openai_checkout_service import CheckoutSessionError, openai_checkout_service
 from services.proxy_service import normalize_proxy_url_list
@@ -376,6 +377,7 @@ def _normalize(raw: dict) -> dict:
         "continuous_retry": continuous_retry,
     }
     cfg["sub2api_sync"] = normalize_sync_config(cfg.get("sub2api_sync"))
+    cfg["cpa_sync"] = normalize_cpa_delivery_config(cfg.get("cpa_sync"))
     grok_source = cfg.get("grok") if isinstance(cfg.get("grok"), dict) else {}
     grok = {**DEFAULT_GROK_CONFIG, **grok_source}
     nested_bridge = grok_source.get("grok2api") if isinstance(grok_source.get("grok2api"), dict) else {}
@@ -523,7 +525,7 @@ class RegisterService:
             backend.register_checkout_retry_sink = self._enqueue_checkout_retry
         if runtime["target"] == "grok" and hasattr(backend, "account_result_sink"):
             backend.account_result_sink = self._persist_grok_account_snapshot
-        config_keys = ["mail", "proxy", "total", "threads", "checkout", "sub2api_sync"]
+        config_keys = ["mail", "proxy", "total", "threads", "checkout", "sub2api_sync", "cpa_sync"]
         if runtime["target"] == "grok":
             config_keys.extend(["target", "grok"])
         backend.config.update(

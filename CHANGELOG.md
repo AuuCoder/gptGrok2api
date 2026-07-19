@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.5 - 2026-07-19
+
++ [修复] OpenAI 注册默认切回 `PlatformRegistrar`，对齐上游最新 authorize/passwordless signup 链路，保留传统密码流程作为显式回退。
++ [新增] OpenAI 注册成功后可自动上传到 CPA / CLIProxyAPI，生成官方 `codex-邮箱.json` OAuth 文件，并与 Sub2API 独立投递。
++ [新增] 注册中心“外部同步”增加 OpenAI CPA 开关和连接选择，上传失败不影响本地账号保存。
++ [修复] Outlook Token IMAP 取码复用已认证连接，并对 `authenticated but not connected` 等瞬时断线进行退避重试。
++ [安全] CPA/Sub2API 投递错误继续隐藏 access token、refresh token、id token 和密码，CPA Codex 文件不写入注册密码。
++ [文档] 更新 macOS、Ubuntu/Linux、NovaApi 与 CPA 自动投递和错误日志说明，补充 `codex-*.json` 验收步骤。
+
 ## 1.0.4 - 2026-07-19
 
 + [新增] 将本地 Captcha Solver 完整源码并入主仓库 `captcha-solver/`，安装 GPTGrok2API 后不再需要额外克隆 `xai-grok-mass`。

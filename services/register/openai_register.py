@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from curl_cffi import requests
 
 from services.account_service import account_service
+from services.cpa_service import cpa_config, normalize_cpa_delivery_config, upload_openai_oauth_file
 from services.json_file import read_json_object
 from services.openai_checkout_service import CheckoutSessionError, openai_checkout_service
 from services.proxy_service import ClearanceBundle, proxy_settings
@@ -59,13 +60,17 @@ config = {
         "group_id": "",
         "group_name": "",
     },
+    "cpa_sync": {
+        "enabled": False,
+        "pool_id": "",
+    },
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = read_json_object(register_config_file, name="register.json")
     config.update({
         key: saved_config[key]
-        for key in ("mail", "proxy", "total", "threads", "checkout", "sub2api_sync")
+        for key in ("mail", "proxy", "total", "threads", "checkout", "sub2api_sync", "cpa_sync")
         if key in saved_config
     })
 except Exception:
@@ -2792,24 +2797,32 @@ class TraditionalChatGPTRegistrar(ChatGPTWebRegistrar):
         return result
 
 
-def _safe_sub2api_sync_error(error: Exception, account: dict) -> str:
+def _safe_external_sync_error(error: Exception, account: dict, default_message: str) -> str:
     """Return one short registration-log message without OAuth credentials."""
-    message = " ".join(str(error or "Sub2API 同步失败").replace("\n", " ").split())[:300]
+    message = " ".join(str(error or default_message).replace("\n", " ").split())[:300]
     for key in ("access_token", "refresh_token", "id_token", "cookie_header", "password"):
         value = str(account.get(key) or "").strip()
         if value:
             message = message.replace(value, "***")
-    return message or "Sub2API 同步失败"
+    return message or default_message
 
 
-def _sub2api_sync_account_payload(registrar: Any, account: dict, index: int) -> dict:
+def _safe_sub2api_sync_error(error: Exception, account: dict) -> str:
+    return _safe_external_sync_error(error, account, "Sub2API 同步失败")
+
+
+def _safe_cpa_sync_error(error: Exception, account: dict) -> str:
+    return _safe_external_sync_error(error, account, "CPA 同步失败")
+
+
+def _sub2api_sync_account_payload(registrar: Any, account: dict, index: int, target_label: str = "Sub2API") -> dict:
     """Build a durable OAuth payload while retaining the local web account."""
     if str(account.get("refresh_token") or "").strip():
         return dict(account)
     extractor = getattr(registrar, "extract_platform_oauth_credentials", None)
     if not callable(extractor):
-        raise RuntimeError("当前注册会话无法提取 Sub2API 所需的 OAuth 凭据")
-    step(index, "正在提取 Sub2API OAuth 凭据")
+        raise RuntimeError(f"当前注册会话无法提取 {target_label} 所需的 OAuth 凭据")
+    step(index, f"正在提取 {target_label} OAuth 凭据")
     tokens = extractor(str(account.get("email") or "").strip(), index)
     payload = dict(account)
     for key in ("access_token", "refresh_token", "id_token", "expires_at"):
@@ -2817,15 +2830,15 @@ def _sub2api_sync_account_payload(registrar: Any, account: dict, index: int) -> 
         if value:
             payload[key] = value
     if not str(payload.get("refresh_token") or "").strip():
-        raise RuntimeError("未能提取 Sub2API 所需的 OAuth refresh_token")
+        raise RuntimeError(f"未能提取 {target_label} 所需的 OAuth refresh_token")
     return payload
 
 
-def _sync_registered_account_to_sub2api(index: int, account: dict, registrar: Any) -> None:
+def _sync_registered_account_to_sub2api(index: int, account: dict, registrar: Any) -> dict:
     """Best-effort post-registration sync.  It must never fail the GPT task."""
     sync_settings = normalize_sync_config(config.get("sub2api_sync"))
     if not sync_settings["enabled"]:
-        return
+        return dict(account)
 
     access_token = str(account.get("access_token") or "").strip()
     server_id = str(sync_settings.get("server_id") or "").strip()
@@ -2875,6 +2888,64 @@ def _sync_registered_account_to_sub2api(index: int, account: dict, registrar: An
         )
         account["sub2api_sync_status"] = "failed"
         step(index, f"Sub2API 同步未成功，本地账号已保留：{safe_error}", "yellow")
+    return sync_account
+
+
+def _sync_registered_account_to_cpa(
+    index: int,
+    account: dict,
+    registrar: Any,
+    credential_account: dict | None = None,
+) -> None:
+    """Best-effort CPA upload after the local OpenAI account is persisted."""
+    sync_settings = normalize_cpa_delivery_config(config.get("cpa_sync"))
+    if not sync_settings["enabled"]:
+        return
+
+    access_token = str(account.get("access_token") or "").strip()
+    pool_id = str(sync_settings.get("pool_id") or "").strip()
+    sync_time = datetime.now(timezone.utc).isoformat()
+    sync_account = dict(credential_account or account)
+    try:
+        if not pool_id:
+            raise RuntimeError("未选择 CPA 连接")
+        pool = cpa_config.get_pool(pool_id)
+        if pool is None:
+            raise RuntimeError("选定的 CPA 连接不存在或已删除")
+
+        step(index, "正在上传账号到 CPA")
+        sync_account = _sub2api_sync_account_payload(registrar, sync_account, index, "CPA")
+        sync_result = upload_openai_oauth_file(pool, sync_account)
+        pool_name = str(sync_result.get("pool_name") or pool.get("name") or pool_id).strip()
+        file_name = str(sync_result.get("file_name") or "").strip()
+        account_service.update_account(
+            access_token,
+            {
+                "cpa_sync_status": "success",
+                "cpa_sync_pool_id": pool_id,
+                "cpa_sync_pool_name": pool_name,
+                "cpa_sync_file_name": file_name,
+                "cpa_sync_at": sync_time,
+                "cpa_sync_error": None,
+            },
+            quiet=True,
+        )
+        account["cpa_sync_status"] = "success"
+        step(index, f"已上传到 CPA：{pool_name} / {file_name}", "green")
+    except Exception as error:
+        safe_error = _safe_cpa_sync_error(error, sync_account)
+        account_service.update_account(
+            access_token,
+            {
+                "cpa_sync_status": "failed",
+                "cpa_sync_pool_id": pool_id,
+                "cpa_sync_at": sync_time,
+                "cpa_sync_error": safe_error,
+            },
+            quiet=True,
+        )
+        account["cpa_sync_status"] = "failed"
+        step(index, f"CPA 上传未成功，本地账号已保留：{safe_error}", "yellow")
 
 
 def _enabled_mail_provider_count() -> int:
@@ -2938,7 +3009,8 @@ def worker(index: int) -> dict:
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
-        _sync_registered_account_to_sub2api(index, result, registrar)
+        credential_account = _sync_registered_account_to_sub2api(index, result, registrar)
+        _sync_registered_account_to_cpa(index, result, registrar, credential_account)
         checkout_settings = _checkout_config()
         if checkout_settings["enabled"]:
             checkout_channel = checkout_settings["channel"]

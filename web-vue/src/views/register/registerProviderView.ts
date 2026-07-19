@@ -194,6 +194,10 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     group_id: '',
     group_name: '',
   },
+  cpa_sync: {
+    enabled: false,
+    pool_id: '',
+  },
   mail: {
     request_timeout: 30,
     wait_timeout: 30,
@@ -452,6 +456,13 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
   sub2apiSync.group_name = String(sub2apiSync.group_name || '').trim()
   if (sub2apiSync.group_mode === 'custom') sub2apiSync.group_id = ''
   else sub2apiSync.group_name = ''
+  const cpaSyncSource = raw.cpa_sync || {}
+  const cpaSync = {
+    ...defaultRegisterConfig.cpa_sync,
+    ...cpaSyncSource,
+    enabled: Boolean(cpaSyncSource.enabled),
+    pool_id: String(cpaSyncSource.pool_id || '').trim(),
+  }
   return {
     ...defaultRegisterConfig,
     ...raw,
@@ -461,6 +472,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     mail,
     checkout,
     sub2api_sync: sub2apiSync,
+    cpa_sync: cpaSync,
     stats: { ...defaultRegisterConfig.stats, ...(raw.stats || {}) },
     logs: Array.isArray(raw.logs) ? raw.logs : [],
   }
@@ -647,6 +659,10 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
       group_id: sub2apiSyncMode === 'existing' ? String(config.sub2api_sync?.group_id || '').trim() : '',
       group_name: sub2apiSyncMode === 'custom' ? String(config.sub2api_sync?.group_name || '').trim() : '',
     },
+    cpa_sync: {
+      enabled: Boolean(config.cpa_sync?.enabled),
+      pool_id: String(config.cpa_sync?.pool_id || '').trim(),
+    },
     mail: {
       ...config.mail,
       providers: (config.mail.providers || [])
@@ -685,15 +701,18 @@ export function grokRequirementMessages(config: LegacyRegisterConfig | null | un
 }
 
 export function sub2apiSyncRequirementMessages(config: LegacyRegisterConfig | null | undefined) {
-  if (!config || normalizeRegisterTarget(config.target) !== 'openai' || !config.sub2api_sync?.enabled) return []
-  const sync = config.sub2api_sync
+  if (!config || normalizeRegisterTarget(config.target) !== 'openai') return []
   const missing: string[] = []
-  if (!isFilled(sync.server_id)) missing.push('Sub2API 连接')
-  if (sync.group_mode === 'custom') {
-    if (!isFilled(sync.group_name)) missing.push('自定义远端分组')
-  } else if (!isFilled(sync.group_id)) {
-    missing.push('远端分组')
+  const sub2api = config.sub2api_sync
+  if (sub2api?.enabled) {
+    if (!isFilled(sub2api.server_id)) missing.push('Sub2API 连接')
+    if (sub2api.group_mode === 'custom') {
+      if (!isFilled(sub2api.group_name)) missing.push('自定义远端分组')
+    } else if (!isFilled(sub2api.group_id)) {
+      missing.push('远端分组')
+    }
   }
+  if (config.cpa_sync?.enabled && !isFilled(config.cpa_sync.pool_id)) missing.push('CPA 连接')
   return missing
 }
 

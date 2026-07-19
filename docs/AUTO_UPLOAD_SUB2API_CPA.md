@@ -7,12 +7,13 @@
 | 注册目标 | 自动投递目标 | 投递内容 | 必要条件 |
 | --- | --- | --- | --- |
 | OpenAI | NovaApi（后台显示为 Sub2API） | OpenAI OAuth 账号 | 开启“注册成功后同步到 Sub2API” |
+| OpenAI | CPA / CLIProxyAPI | `codex-邮箱.json` OAuth 文件 | 开启“注册成功后上传到 CPA” |
 | Grok | NovaApi（后台显示为 Sub2API） | xAI OAuth 账号 | “注册后自动协议授权”成功，并开启“上传到 Sub2API” |
 | Grok | CPA / CLIProxyAPI | `xai-邮箱.json` OAuth 文件 | “注册后自动协议授权”成功，并开启“上传到 CPA” |
 
 重要区别：
 
-- OpenAI 注册目前只支持自动同步到 NovaApi，不会自动上传到 CPA。
+- OpenAI 的 NovaApi 和 CPA 两个目标可以同时开启，程序会分别投递。
 - Grok 注册成功只代表拿到 Grok 登录态；还要完成 xAI Device Code OAuth，才有可投递到 NovaApi/CPA 的 OAuth 凭据。
 - 所有远程投递都是 best-effort：远端失败时，本地注册结果和本地 OAuth 凭据仍会保留。
 - Grok 的 NovaApi 和 CPA 两个目标可以同时开启，程序会分别投递，一个失败不会阻止另一个。
@@ -206,11 +207,11 @@ https://nova.example.com
 
 两台服务器之间也可以使用内网 IP，但要限制防火墙来源。不要把 PostgreSQL、Redis 或 NovaApi 管理接口无保护地开放到互联网。
 
-## 5. OpenAI 注册后自动同步到 NovaApi
+## 5. OpenAI 注册后自动同步到 NovaApi 和 CPA
 
 1. 进入“注册中心”。
 2. 注册目标选择 `OpenAI`。
-3. 展开“Sub2API 同步”。
+3. 展开“外部同步”。
 4. 开启“注册成功后同步到 Sub2API”。
 5. 选择刚添加的“作者 NovaApi”连接。
 6. 选择远端分组方式。
@@ -235,6 +236,21 @@ https://nova.example.com
 ```text
 Sub2API 同步未成功，本地账号已保留
 ```
+
+需要同时上传 CPA 时：
+
+1. 在同一个“外部同步”区域开启“注册成功后上传到 CPA”。
+2. 选择已保存的 CPA 连接。
+3. 保存后使用数量 `1`、并发 `1` 测试。
+
+成功时日志包含：
+
+```text
+正在上传账号到 CPA
+已上传到 CPA：主 CPA / codex-user@example.com.json
+```
+
+CPA 文件使用 CLIProxyAPI 官方 Codex OAuth 格式，包含 `type: codex`、`email`、`account_id`、`access_token`、`refresh_token`、`id_token`、`expired` 和 `last_refresh`，不会写入注册密码。
 
 ## 6. 添加 CPA / CLIProxyAPI 连接
 
@@ -314,7 +330,12 @@ xai-user@example.com.json
 
 ### 8.2 CPA
 
-在 CPA/CLIProxyAPI 后台确认新增 `xai-*.json` 文件，或通过其管理接口检查：
+在 CPA/CLIProxyAPI 后台确认新增认证文件：
+
+- OpenAI：`codex-*.json`。
+- Grok：`xai-*.json`。
+
+也可以通过其管理接口检查：
 
 ```bash
 curl -sS http://127.0.0.1:8317/v0/management/auth-files \
@@ -365,8 +386,9 @@ docker inspect sub2api --format '{{.Config.Image}}'
 
 - 确认注册目标确实是 OpenAI。
 - 确认“注册成功后同步到 Sub2API”已开启。
+- 如目标是 CPA，确认“注册成功后上传到 CPA”已开启并已选择 CPA 连接。
 - 检查是否选择连接和远端分组。
-- 查看注册日志中是否出现 OAuth refresh token 提取失败或 Sub2API HTTP 错误。
+- 查看注册日志中是否出现 OAuth refresh token 提取失败、Sub2API HTTP 错误或 CPA HTTP 错误。
 
 同步失败不会回滚本地账号，需要修好连接后重新执行同步或重新测试一个账号。
 

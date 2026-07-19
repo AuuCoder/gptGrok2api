@@ -288,7 +288,7 @@
 
     <FormSection
       v-if="config.target === 'openai'"
-      title="Sub2API 同步"
+      title="外部同步"
       density="roomy"
       :class="{ 'register-collapsible-section--collapsed': !sub2apiExpanded }"
     >
@@ -296,18 +296,18 @@
         <Button
           size="sm"
           variant="outline"
-          :disabled="sub2apiLoading"
-          @click="refreshSub2APIConnections"
+          :disabled="sub2apiLoading || openAICPALoading"
+          @click="refreshOpenAIConnections"
         >
-          {{ sub2apiLoading ? '刷新中...' : '刷新连接' }}
+          {{ sub2apiLoading || openAICPALoading ? '刷新中...' : '刷新连接' }}
         </Button>
         <Button
           size="sm"
           variant="ghost"
           icon-only
           root-class="h-8 w-8 shrink-0"
-          :title="sub2apiExpanded ? '收起 Sub2API 同步' : '展开 Sub2API 同步'"
-          :aria-label="sub2apiExpanded ? '收起 Sub2API 同步' : '展开 Sub2API 同步'"
+          :title="sub2apiExpanded ? '收起外部同步' : '展开外部同步'"
+          :aria-label="sub2apiExpanded ? '收起外部同步' : '展开外部同步'"
           :aria-expanded="sub2apiExpanded"
           aria-controls="register-sub2api-settings"
           @click="sub2apiExpanded = !sub2apiExpanded"
@@ -402,6 +402,42 @@
               请选择一个已保存的 Sub2API 连接。
             </p>
           </template>
+        </template>
+
+        <div class="register-field--full border-t border-border pt-4"></div>
+
+        <label class="register-toggle register-field--full">
+          <Checkbox
+            :model-value="config.cpa_sync.enabled"
+            :disabled="config.enabled"
+            @update:model-value="updateOpenAICPAEnabled"
+          />
+          <span>
+            <strong>注册成功后上传到 CPA</strong>
+            <small>上传 CLIProxyAPI 兼容的 codex OAuth JSON；上传失败不会影响本地注册结果。</small>
+          </span>
+        </label>
+
+        <template v-if="config.cpa_sync.enabled">
+          <p v-if="openAICPALoadError" class="sub2api-sync-message register-field--full sub2api-sync-message--error">
+            {{ openAICPALoadError }}
+          </p>
+
+          <p v-if="!cpaPools.length && !openAICPALoading" class="sub2api-sync-message register-field--full">
+            尚未配置 CPA 连接。请先在“设置 / 外部来源”添加连接，再返回这里选择。
+          </p>
+
+          <label v-if="cpaPools.length || openAICPALoading" class="register-field register-field--full">
+            <span class="register-label">CPA 连接</span>
+            <GroupedSelectMenu
+              :model-value="config.cpa_sync.pool_id"
+              :groups="openAICPAPoolGroups"
+              selected-indicator="none"
+              :disabled="config.enabled || openAICPALoading"
+              block
+              @update:model-value="updateOpenAICPAPool"
+            />
+          </label>
         </template>
 
       </div>
@@ -844,6 +880,8 @@ const sub2apiLoading = ref(false)
 const sub2apiGroupsLoading = ref(false)
 const sub2apiLoadError = ref('')
 const sub2apiExpanded = ref(false)
+const openAICPALoading = ref(false)
+const openAICPALoadError = ref('')
 const oauthDeliveryExpanded = ref(false)
 const oauthDeliveryLoading = ref(false)
 const oauthDeliveryGroupsLoading = ref(false)
@@ -1015,6 +1053,21 @@ const oauthDeliveryCPAPoolGroups = computed(() => {
   return [{ options }]
 })
 
+const openAICPAPoolGroups = computed(() => {
+  const options = [
+    { label: '选择 CPA 连接', value: '' },
+    ...cpaPools.value.map((pool) => ({
+      label: pool.name || pool.base_url || pool.id,
+      value: pool.id,
+    })),
+  ]
+  const currentId = String(props.config.cpa_sync.pool_id || '').trim()
+  if (currentId && !options.some((option) => option.value === currentId)) {
+    options.push({ label: `当前连接（不可用）· ${currentId}`, value: currentId })
+  }
+  return [{ options }]
+})
+
 function selectValue(value: unknown) {
   return String(Array.isArray(value) ? value[0] || '' : value || '').trim()
 }
@@ -1059,6 +1112,24 @@ async function refreshSub2APIConnections() {
   } finally {
     sub2apiLoading.value = false
   }
+}
+
+async function refreshOpenAICPAConnections() {
+  openAICPALoading.value = true
+  openAICPALoadError.value = ''
+  try {
+    const response = await accountImportsApi.listCPAPools()
+    cpaPools.value = Array.isArray(response.pools) ? response.pools : []
+  } catch (error: any) {
+    cpaPools.value = []
+    openAICPALoadError.value = error?.message || '加载 CPA 连接失败'
+  } finally {
+    openAICPALoading.value = false
+  }
+}
+
+async function refreshOpenAIConnections() {
+  await Promise.all([refreshSub2APIConnections(), refreshOpenAICPAConnections()])
 }
 
 async function loadOAuthDeliveryRemoteGroups(serverId: string) {
@@ -1141,6 +1212,14 @@ function updateSub2APIEnabled(value: unknown) {
   props.config.sub2api_sync.enabled = enabled
 }
 
+function updateOpenAICPAEnabled(value: unknown) {
+  props.config.cpa_sync.enabled = Boolean(value)
+}
+
+function updateOpenAICPAPool(value: unknown) {
+  props.config.cpa_sync.pool_id = selectValue(value)
+}
+
 function updateSub2APIGroupMode(value: unknown) {
   const mode = selectValue(value) === 'custom' ? 'custom' : 'existing'
   if (mode === props.config.sub2api_sync.group_mode) return
@@ -1164,8 +1243,13 @@ function updateSub2APIGroupName(value: unknown) {
 watch(
   () => String(props.config.target || '').trim().toLowerCase(),
   (target) => {
-    if (target === 'openai' && !sub2apiServers.value.length && !sub2apiLoading.value) {
-      void refreshSub2APIConnections()
+    if (
+      target === 'openai'
+      && (!sub2apiServers.value.length || !cpaPools.value.length)
+      && !sub2apiLoading.value
+      && !openAICPALoading.value
+    ) {
+      void refreshOpenAIConnections()
     }
     if (target === 'grok' && !oauthDeliveryLoading.value && (!sub2apiServers.value.length || !cpaPools.value.length)) {
       void refreshOAuthDeliveryConnections()

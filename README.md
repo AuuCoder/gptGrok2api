@@ -26,7 +26,7 @@ GPTGrok2API 是一个自托管的 GPT 与 Grok 统一网关，将已接入的订
 | 本地 Captcha Solver | 源码内置于 `captcha-solver/`，使用 CloakBrowser/Chromium 处理 Grok Turnstile 实页校验，支持注册代理按请求透传，不需要额外克隆第二个仓库。 |
 | Checkout 提链 | 注册 Checkout 仅保留 UPI 最终支付链接提取；IN Checkout、Provider、Approve 共享同一 sticky 出口，VN Promotion 使用独立代理持续轮换重试。 |
 | 代理与稳定出口 | 支持全局代理、账号代理、代理配置、代理组、节点并发限制、故障反馈、备用出口、WARP、Privoxy、FlareSolverr 和 Clearance 刷新。 |
-| 外部系统接入 | 支持从 Sub2API、远程 CPA、本地 CPA 和 Access Token 导入账号；服务器部署提供 `gptgrok2api` Docker 网络别名。 |
+| 外部系统接入 | 支持从 Sub2API、远程 CPA、本地 CPA 和 Access Token 导入账号；OpenAI/Grok 注册后可自动投递 NovaApi 和 CPA；服务器部署提供 `gptgrok2api` Docker 网络别名。 |
 | 管理控制台 | 提供概览、GPT/Grok 账号管理、Grok Runtime、iCloud 邮箱、注册任务、Checkout 任务、代理管理、日志、实时监控、图片管理、调试中心和系统设置。 |
 | 存储与备份 | 账号数据支持 JSON、SQLite、PostgreSQL 和 Git 后端；图片支持本地与 WebDAV；备份支持本地归档和 R2。 |
 | 运维与发布 | 支持 Docker Compose、WARP 编排、内置 sidecar、Nginx HTTPS、运行日志、指标趋势、健康检查和 GitHub Releases 更新源。 |

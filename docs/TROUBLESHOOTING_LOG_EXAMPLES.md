@@ -353,10 +353,14 @@ docker inspect sub2api --format '{{.Config.Image}}'
 日志示例：
 
 ```text
+CPA 上传 OpenAI OAuth 文件失败（HTTP 401）
+CPA 上传 OpenAI OAuth 文件失败（HTTP 404）
 CPA 上传 xAI OAuth 文件失败（HTTP 401）
 CPA 上传 xAI OAuth 文件失败（HTTP 404）
 CPA 上传 xAI OAuth 文件请求失败
 ```
+
+OpenAI 会上传 `codex-*.json`，Grok 会上传 `xai-*.json`；两者使用同一个 CPA 管理接口。
 
 判断：
 

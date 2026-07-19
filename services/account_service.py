@@ -1711,6 +1711,45 @@ class AccountService:
 
         return result
 
+    def build_export_item(self, account: dict) -> dict[str, str] | None:
+        access_token = str(account.get("access_token") or "").strip()
+        refresh_token = str(account.get("refresh_token") or "").strip()
+        id_token = str(account.get("id_token") or "").strip()
+        if not access_token or not refresh_token or not id_token:
+            return None
+
+        access_payload = self._decode_jwt_payload(access_token)
+        id_payload = self._decode_jwt_payload(id_token)
+        auth_claim = access_payload.get("https://api.openai.com/auth")
+        auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
+        profile_claim = access_payload.get("https://api.openai.com/profile")
+        profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
+
+        email = (
+            str(account.get("email") or "").strip()
+            or str(profile_claim.get("email") or "").strip()
+            or str(id_payload.get("email") or "").strip()
+        )
+        account_id = (
+            str(account.get("account_id") or "").strip()
+            or str(auth_claim.get("chatgpt_account_id") or "").strip()
+            or str(account.get("user_id") or "").strip()
+        )
+        item = {
+            "type": str(account.get("export_type") or "codex"),
+            "email": email,
+            "account_id": account_id,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "id_token": id_token,
+            "expired": self._timestamp_to_iso(access_payload.get("exp")),
+            "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
+        }
+        password = str(account.get("password") or "").strip()
+        if password:
+            item["password"] = password
+        return item
+
     def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str]]:
         target_tokens = set(token for token in (access_tokens or []) if token)
         with self._lock:
@@ -1720,46 +1759,7 @@ class AccountService:
                 if not target_tokens or str(item.get("access_token") or "") in target_tokens
             ]
 
-        items: list[dict[str, str]] = []
-        for account in accounts:
-            access_token = str(account.get("access_token") or "").strip()
-            refresh_token = str(account.get("refresh_token") or "").strip()
-            id_token = str(account.get("id_token") or "").strip()
-            if not access_token or not refresh_token or not id_token:
-                continue
-
-            access_payload = self._decode_jwt_payload(access_token)
-            id_payload = self._decode_jwt_payload(id_token)
-            auth_claim = access_payload.get("https://api.openai.com/auth")
-            auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
-            profile_claim = access_payload.get("https://api.openai.com/profile")
-            profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
-
-            email = (
-                str(account.get("email") or "").strip()
-                or str(profile_claim.get("email") or "").strip()
-                or str(id_payload.get("email") or "").strip()
-            )
-            account_id = (
-                str(account.get("account_id") or "").strip()
-                or str(auth_claim.get("chatgpt_account_id") or "").strip()
-                or str(account.get("user_id") or "").strip()
-            )
-            item = {
-                "type": str(account.get("export_type") or "codex"),
-                "email": email,
-                "account_id": account_id,
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "id_token": id_token,
-                "expired": self._timestamp_to_iso(access_payload.get("exp")),
-                "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
-            }
-            password = str(account.get("password") or "").strip()
-            if password:
-                item["password"] = password
-            items.append(item)
-        return items
+        return [item for account in accounts if (item := self.build_export_item(account)) is not None]
 
     def get_stats(self) -> dict:
         with self._lock:

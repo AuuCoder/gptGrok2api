@@ -67,6 +67,38 @@ class CPAOAuthUploadTest(unittest.TestCase):
         self.assertNotIn("access-must-not-leak", message)
         self.assertNotIn("refresh-must-not-leak", message)
 
+    def test_upload_openai_uses_cliproxyapi_codex_contract(self) -> None:
+        session = MagicMock()
+        session.post.return_value = _Response(200)
+        with patch("services.cpa_service.Session", return_value=session):
+            result = cpa_service.upload_openai_oauth_file(self._pool(), self._account())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["file_name"], "codex-person@example.test.json")
+        file_name, content, content_type = session.post.call_args.kwargs["files"]["file"]
+        self.assertEqual(file_name, "codex-person@example.test.json")
+        self.assertEqual(content_type, "application/json")
+        payload = json.loads(content)
+        self.assertEqual(payload["type"], "codex")
+        self.assertEqual(payload["email"], "person@example.test")
+        self.assertEqual(payload["access_token"], "access-must-not-leak")
+        self.assertEqual(payload["refresh_token"], "refresh-must-not-leak")
+        self.assertEqual(payload["id_token"], "id-must-not-leak")
+        self.assertNotIn("password", payload)
+
+    def test_upload_openai_requires_complete_oauth_credentials(self) -> None:
+        account = self._account()
+        account["id_token"] = ""
+
+        with self.assertRaisesRegex(cpa_service.CPAUploadError, "缺少完整 OAuth 凭据"):
+            cpa_service.upload_openai_oauth_file(self._pool(), account)
+
+    def test_normalize_cpa_delivery_config(self) -> None:
+        self.assertEqual(
+            cpa_service.normalize_cpa_delivery_config({"enabled": "true", "pool_id": " pool-one "}),
+            {"enabled": True, "pool_id": "pool-one"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

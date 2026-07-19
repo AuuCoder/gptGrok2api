@@ -618,7 +618,7 @@ sudo systemctl restart captcha-solver
 
 本系统支持：
 
-- OpenAI 注册成功后自动同步到 NovaApi。
+- OpenAI 注册成功后自动同步到 NovaApi，并可同时上传到 CPA。
 - Grok 完成 xAI OAuth 协议授权后，同时或分别上传到 NovaApi 和 CPA。
 
 Sub2API 必须优先使用项目作者魔改版 [AuuCoder/NovaApi](https://github.com/AuuCoder/NovaApi)。该仓库默认 Compose 仍可能引用普通上游镜像，因此不能只克隆仓库后直接启动。
@@ -627,7 +627,7 @@ Sub2API 必须优先使用项目作者魔改版 [AuuCoder/NovaApi](https://githu
 
 - [自动上传到 NovaApi（Sub2API）与 CPA 配置手册](AUTO_UPLOAD_SUB2API_CPA.md)
 
-首次必须使用数量 `1`、并发 `1` 验证。确认 NovaApi 中出现对应 `openai/xai` OAuth 账号、CPA 中出现 `xai-*.json` 后，再增加并发。
+首次必须使用数量 `1`、并发 `1` 验证。确认 NovaApi 中出现对应 `openai/xai` OAuth 账号、CPA 中出现 OpenAI 的 `codex-*.json` 或 Grok 的 `xai-*.json` 后，再增加并发。
 
 ## 19. 配置 Nginx 和 HTTPS
 
@@ -906,7 +906,7 @@ sudo systemctl daemon-reload
 - [ ] 首个注册任务使用数量 `1`、并发 `1`。
 - [ ] 单任务成功后再增加并发。
 - [ ] 如启用 NovaApi 自动投递，实际镜像为作者魔改版且目标分组出现测试账号。
-- [ ] 如启用 CPA 自动投递，CPA 中出现测试账号对应的 `xai-*.json`。
+- [ ] 如启用 CPA 自动投递，CPA 中出现 OpenAI 的 `codex-*.json` 或 Grok 的 `xai-*.json`。
 
 ## 28. 快速命令表
 

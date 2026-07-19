@@ -20,6 +20,7 @@ from services.proxy_service import proxy_settings
 
 
 CPA_CONFIG_FILE = DATA_DIR / "cpa_config.json"
+DEFAULT_CPA_DELIVERY_CONFIG = {"enabled": False, "pool_id": ""}
 
 
 def _new_id() -> str:
@@ -65,6 +66,17 @@ def _management_headers(secret_key: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {secret_key}",
         "Accept": "application/json",
+    }
+
+
+def normalize_cpa_delivery_config(raw: object) -> dict[str, object]:
+    source = raw if isinstance(raw, dict) else {}
+    enabled = source.get("enabled")
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+    return {
+        "enabled": bool(enabled),
+        "pool_id": str(source.get("pool_id") or "").strip(),
     }
 
 
@@ -245,16 +257,28 @@ def _xai_auth_file_payload(account: dict) -> dict:
     return payload
 
 
-def upload_xai_oauth_file(pool: dict, account: dict) -> dict:
-    """Upload one xAI OAuth JSON file through CLIProxyAPI's management API."""
+def _codex_auth_file_name(account: dict) -> str:
+    identity = str(account.get("email") or account.get("account_id") or "oauth").strip()
+    safe_identity = re.sub(r"[^A-Za-z0-9@._-]+", "-", identity).strip("-._")[:120] or "oauth"
+    return f"codex-{safe_identity}.json"
+
+
+def _codex_auth_file_payload(account: dict) -> dict:
+    payload = account_service.build_export_item(account)
+    if payload is None:
+        raise CPAUploadError("本地 OpenAI 账号缺少完整 OAuth 凭据，无法上传")
+    payload.pop("password", None)
+    payload["type"] = "codex"
+    return payload
+
+
+def _upload_auth_file(pool: dict, file_name: str, payload: dict, provider_label: str) -> dict:
     pool_id = str(pool.get("id") or "").strip()
     base_url = str(pool.get("base_url") or "").strip()
     secret_key = str(pool.get("secret_key") or "").strip()
     if not pool_id or not base_url or not secret_key:
         raise CPAUploadError("CPA 连接不完整，请重新保存连接")
 
-    file_name = _xai_auth_file_name(account)
-    payload = _xai_auth_file_payload(account)
     session = Session(**proxy_settings.build_session_kwargs(verify=True))
     try:
         response = session.post(
@@ -270,11 +294,11 @@ def upload_xai_oauth_file(pool: dict, account: dict) -> dict:
             timeout=30,
         )
         if not response.ok:
-            raise CPAUploadError(f"CPA 上传 xAI OAuth 文件失败（HTTP {response.status_code}）")
+            raise CPAUploadError(f"CPA 上传 {provider_label} OAuth 文件失败（HTTP {response.status_code}）")
     except CPAUploadError:
         raise
     except Exception as exc:
-        raise CPAUploadError("CPA 上传 xAI OAuth 文件请求失败") from exc
+        raise CPAUploadError(f"CPA 上传 {provider_label} OAuth 文件请求失败") from exc
     finally:
         session.close()
 
@@ -284,6 +308,20 @@ def upload_xai_oauth_file(pool: dict, account: dict) -> dict:
         "pool_name": str(pool.get("name") or "").strip() or base_url,
         "file_name": file_name,
     }
+
+
+def upload_xai_oauth_file(pool: dict, account: dict) -> dict:
+    """Upload one xAI OAuth JSON file through CLIProxyAPI's management API."""
+    file_name = _xai_auth_file_name(account)
+    payload = _xai_auth_file_payload(account)
+    return _upload_auth_file(pool, file_name, payload, "xAI")
+
+
+def upload_openai_oauth_file(pool: dict, account: dict) -> dict:
+    """Upload one OpenAI Codex OAuth JSON file through CLIProxyAPI's management API."""
+    file_name = _codex_auth_file_name(account)
+    payload = _codex_auth_file_payload(account)
+    return _upload_auth_file(pool, file_name, payload, "OpenAI")
 
 
 class CPAImportService:

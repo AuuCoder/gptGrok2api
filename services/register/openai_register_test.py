@@ -961,6 +961,10 @@ class RegistrationCheckoutWorkerTest(unittest.TestCase):
                 "group_id": "",
                 "group_name": "",
             },
+            "cpa_sync": {
+                "enabled": False,
+                "pool_id": "",
+            },
             "checkout": {
                 "enabled": True,
                 "channel": "upi",
@@ -1198,6 +1202,108 @@ class RegistrationCheckoutWorkerTest(unittest.TestCase):
         self.assertIn("***", saved_status["sub2api_sync_error"])
         self.assertNotIn("chatgpt-refresh-secret", saved_status["sub2api_sync_error"])
         self.assertEqual(result["result"]["sub2api_sync_status"], "failed")
+        registrar.close.assert_called_once()
+
+    def test_worker_saves_account_before_uploading_to_cpa_and_records_success(self) -> None:
+        openai_register.config["checkout"] = {"enabled": False}
+        openai_register.config["cpa_sync"] = {"enabled": True, "pool_id": "cpa-primary"}
+        registrar = MagicMock()
+        registrar.register.return_value = {
+            "email": "new@example.test",
+            "access_token": "chatgpt-access",
+            "refresh_token": "chatgpt-refresh",
+            "id_token": "chatgpt-id",
+            "source_type": "web",
+        }
+        pool = {"id": "cpa-primary", "name": "主 CPA", "base_url": "https://cpa.example.test"}
+        call_order: list[str] = []
+
+        def save_account(_items: list[dict]) -> None:
+            call_order.append("saved")
+
+        def upload_account(_pool: dict, _account: dict) -> dict:
+            call_order.append("uploaded")
+            return {
+                "ok": True,
+                "pool_id": "cpa-primary",
+                "pool_name": "主 CPA",
+                "file_name": "codex-new@example.test.json",
+            }
+
+        with (
+            patch.object(openai_register, "PlatformRegistrar", return_value=registrar),
+            patch.object(openai_register.account_service, "add_account_items", side_effect=save_account),
+            patch.object(openai_register.cpa_config, "get_pool", return_value=pool) as get_pool,
+            patch.object(openai_register, "upload_openai_oauth_file", side_effect=upload_account) as upload,
+            patch.object(openai_register.account_service, "update_account") as update_account,
+            patch.object(openai_register.account_service, "refresh_accounts", return_value={"errors": []}),
+        ):
+            result = openai_register.worker(1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(call_order, ["saved", "uploaded"])
+        get_pool.assert_called_once_with("cpa-primary")
+        upload.assert_called_once()
+        self.assertEqual(upload.call_args.args[0], pool)
+        self.assertEqual(
+            upload.call_args.args[1],
+            {
+                "email": "new@example.test",
+                "access_token": "chatgpt-access",
+                "refresh_token": "chatgpt-refresh",
+                "id_token": "chatgpt-id",
+                "source_type": "web",
+            },
+        )
+        update_account.assert_called_once_with(
+            "chatgpt-access",
+            {
+                "cpa_sync_status": "success",
+                "cpa_sync_pool_id": "cpa-primary",
+                "cpa_sync_pool_name": "主 CPA",
+                "cpa_sync_file_name": "codex-new@example.test.json",
+                "cpa_sync_at": ANY,
+                "cpa_sync_error": None,
+            },
+            quiet=True,
+        )
+        self.assertEqual(result["result"]["cpa_sync_status"], "success")
+        registrar.close.assert_called_once()
+
+    def test_worker_keeps_registration_successful_when_cpa_upload_fails(self) -> None:
+        openai_register.config["checkout"] = {"enabled": False}
+        openai_register.config["cpa_sync"] = {"enabled": True, "pool_id": "cpa-primary"}
+        registrar = MagicMock()
+        registrar.register.return_value = {
+            "email": "new@example.test",
+            "access_token": "chatgpt-access",
+            "refresh_token": "chatgpt-refresh-secret",
+            "id_token": "chatgpt-id-secret",
+            "source_type": "web",
+        }
+        pool = {"id": "cpa-primary", "name": "主 CPA", "base_url": "https://cpa.example.test"}
+
+        with (
+            patch.object(openai_register, "PlatformRegistrar", return_value=registrar),
+            patch.object(openai_register.account_service, "add_account_items"),
+            patch.object(openai_register.cpa_config, "get_pool", return_value=pool),
+            patch.object(
+                openai_register,
+                "upload_openai_oauth_file",
+                side_effect=RuntimeError("remote rejected chatgpt-refresh-secret"),
+            ),
+            patch.object(openai_register.account_service, "update_account") as update_account,
+            patch.object(openai_register.account_service, "refresh_accounts", return_value={"errors": []}),
+        ):
+            result = openai_register.worker(1)
+
+        self.assertTrue(result["ok"])
+        saved_status = update_account.call_args.args[1]
+        self.assertEqual(saved_status["cpa_sync_status"], "failed")
+        self.assertEqual(saved_status["cpa_sync_pool_id"], "cpa-primary")
+        self.assertIn("***", saved_status["cpa_sync_error"])
+        self.assertNotIn("chatgpt-refresh-secret", saved_status["cpa_sync_error"])
+        self.assertEqual(result["result"]["cpa_sync_status"], "failed")
         registrar.close.assert_called_once()
 
     def test_worker_extracts_checkout_before_closing_registration_session(self) -> None:

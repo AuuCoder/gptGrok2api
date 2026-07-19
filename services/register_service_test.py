@@ -693,6 +693,20 @@ class RegisterServiceGrokTest(unittest.TestCase):
             self.assertEqual(json.loads(store_file.read_text(encoding="utf-8"))["sub2api_sync"], expected)
             self.assertEqual(RegisterService(store_file).get()["sub2api_sync"], expected)
 
+    def test_cpa_sync_update_is_saved_and_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_file = Path(temp_dir) / "register.json"
+            service = RegisterService(store_file)
+            expected = {"enabled": True, "pool_id": "cpa-primary"}
+
+            saved = service.update(
+                {"cpa_sync": {"enabled": "true", "pool_id": "  cpa-primary  "}}
+            )
+
+            self.assertEqual(saved["cpa_sync"], expected)
+            self.assertEqual(json.loads(store_file.read_text(encoding="utf-8"))["cpa_sync"], expected)
+            self.assertEqual(RegisterService(store_file).get()["cpa_sync"], expected)
+
     def test_grok_oauth_delivery_targets_are_independent_and_default_off(self) -> None:
         defaults = _normalize({"target": "grok"})["grok"]["oauth_delivery"]
         self.assertFalse(defaults["sub2api"]["enabled"])
