@@ -15,6 +15,7 @@
 
 - OpenAI 的 NovaApi 和 CPA 两个目标可以同时开启，程序会分别投递。
 - Grok 注册成功只代表拿到 Grok 登录态；还要完成 xAI Device Code OAuth，才有可投递到 NovaApi/CPA 的 OAuth 凭据。
+- Grok 每个账号注册成功后会立即进入单线程 OAuth 上传队列，不需要等待整批注册结束；NovaApi 和 CPA 会在该账号 OAuth 成功后并行投递。
 - 所有远程投递都是 best-effort：远端失败时，本地注册结果和本地 OAuth 凭据仍会保留。
 - Grok 的 NovaApi 和 CPA 两个目标可以同时开启，程序会分别投递，一个失败不会阻止另一个。
 
@@ -303,12 +304,13 @@ NovaApi 分组同样支持两种方式：
 完整成功顺序是：
 
 ```text
-Grok 注册成功
-本地 Grok 账号已保存
-xAI Device Code OAuth 协议授权成功
-上传到 NovaApi 成功
-上传到 CPA 成功
+注册成功
+Grok 账号已保存并加入账号池
+Grok OAuth 授权已进入即时上传队列
+Grok OAuth 授权完成，已上传到 NovaApi、CPA
 ```
+
+OAuth 队列保持单线程，避免同一账号重复授权；注册任务运行时会自动预留一个额外 solver 槽位。例如注册线程和“注册解题并发”均为 `3` 时，启动日志会显示 `solver 总槽位 4`，其中第 4 个槽位供 OAuth 使用。
 
 CPA 中生成的文件名类似：
 

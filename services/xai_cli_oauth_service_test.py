@@ -169,8 +169,9 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         source = {"id": "grok-background", "email": "background@example.com", "password": "password"}
         completed = threading.Event()
 
-        async def run(job_id: str, selected: dict[str, object]) -> None:
+        async def run(job_id: str, selected: dict[str, object], *, notify_failure: bool = True) -> None:
             self.assertEqual(selected, source)
+            self.assertFalse(notify_failure)
             self.service._update_protocol_job(
                 job_id,
                 status="authorized",
@@ -191,11 +192,86 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         job = self.service.get_protocol_authorization_job(started["job"]["id"])
         self.assertIsNotNone(job)
         self.assertEqual(job["status"], "authorized")
+        self.assertTrue(started["queued"])
         for _ in range(20):
             if not self.service._protocol_threads:
                 break
             await asyncio.sleep(0.01)
         self.assertFalse(self.service._protocol_threads)
+
+    async def test_background_protocol_retries_transient_consent_failure_once(self) -> None:
+        source = {"id": "grok-retry", "email": "retry@example.com", "password": "password"}
+        completed = threading.Event()
+        attempts = 0
+
+        async def run(job_id: str, _selected: dict[str, object], *, notify_failure: bool = True) -> None:
+            nonlocal attempts
+            self.assertFalse(notify_failure)
+            attempts += 1
+            if attempts == 1:
+                self.service._update_protocol_job(
+                    job_id,
+                    status="failed",
+                    stage="consent",
+                    message="协议授权失败",
+                    error="consent form missing",
+                )
+                return
+            self.service._update_protocol_job(
+                job_id,
+                status="authorized",
+                stage="completed",
+                message="协议授权完成",
+                error="",
+            )
+            completed.set()
+
+        with patch.object(self.service, "_select_protocol_source_account", return_value=source), patch.object(
+            self.service,
+            "_run_protocol_authorization",
+            new=run,
+        ), patch(
+            "services.xai_cli_oauth_service.time.sleep",
+            return_value=None,
+        ):
+            started = self.service.start_protocol_authorization_background("grok-retry")
+            finished = await asyncio.to_thread(completed.wait, 2)
+
+        self.assertTrue(finished)
+        self.assertEqual(attempts, 2)
+        job = self.service.get_protocol_authorization_job(started["job"]["id"])
+        self.assertEqual(job["status"], "authorized")
+
+    def test_oauth_reserves_one_solver_slot_during_registration(self) -> None:
+        active = self.service._oauth_grok_config(
+            {
+                "enabled": True,
+                "target": "grok",
+                "threads": 3,
+                "stats": {"running": 3},
+                "grok": {"provider": "local", "local_concurrency": 3},
+            }
+        )
+        self.assertEqual(active["local_concurrency"], 4)
+
+        idle = self.service._oauth_grok_config(
+            {
+                "enabled": False,
+                "target": "grok",
+                "threads": 3,
+                "stats": {"running": 0},
+                "grok": {"provider": "local", "local_concurrency": 3},
+            }
+        )
+        self.assertEqual(idle["local_concurrency"], 3)
+
+    def test_oauth_reuses_registration_upstream_proxy(self) -> None:
+        profile = SimpleNamespace(proxy_url="socks5h://proxy.example:1080")
+        with patch("services.proxy_service.proxy_settings.get_profile", return_value=profile) as get_profile:
+            resolved = self.service._resolve_registration_proxy("")
+
+        self.assertEqual(resolved, "socks5h://proxy.example:1080")
+        get_profile.assert_called_once_with(proxy="", upstream=True)
 
     async def test_refresh_rotates_token_without_returning_credentials(self) -> None:
         account = self._account(expires_at="2000-01-01T00:00:00+00:00")

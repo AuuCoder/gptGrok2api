@@ -593,12 +593,49 @@ class TurnstileSolverTest(unittest.TestCase):
         self.assertEqual(calls[0][1]["type"], "turnstile")
         self.assertEqual(calls[0][1]["action"], "signup")
         self.assertIs(calls[0][1]["real_page"], True)
+        self.assertEqual(calls[0][1]["timeout_s"], 60)
+        self.assertEqual(calls[0][1]["queue_timeout_s"], 25)
+        self.assertEqual(calls[0][1]["concurrency"], 2)
         self.assertEqual(calls[0][1]["proxy"], "http://proxy.example.test:8080")
         self.assertNotIn("Authorization", calls[0][2])
 
+    def test_local_solver_retries_unsolved_browser_attempt(self) -> None:
+        calls: list[dict] = []
+        responses = iter([
+            {"solved": False, "error": "Token not received"},
+            {"solved": True, "token": "retry-token"},
+        ])
+
+        def transport(_url: str, payload: dict, _headers: dict) -> dict:
+            calls.append(payload)
+            return next(responses)
+
+        solver = grok_protocol.TurnstileSolver(
+            {
+                "provider": "local",
+                "captcha_timeout": 90,
+                "local_attempt_timeout": 30,
+                "local_max_attempts": 2,
+                "local_concurrency": 6,
+            },
+            transport=transport,
+        )
+        self.addCleanup(solver.close)
+
+        token = solver.solve(
+            website_url="https://accounts.x.ai/sign-up",
+            sitekey="0x-test",
+        )
+
+        self.assertEqual(token, "retry-token")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call["timeout_s"] for call in calls], [30, 30])
+        self.assertEqual([call["queue_timeout_s"] for call in calls], [55, 55])
+        self.assertEqual([call["concurrency"] for call in calls], [6, 6])
+
     def test_local_solver_reports_unsolved_response(self) -> None:
         solver = grok_protocol.TurnstileSolver(
-            {"provider": "local"},
+            {"provider": "local", "local_max_attempts": 1},
             transport=lambda _url, _payload, _headers: {
                 "solved": False,
                 "error": "Token not received",
@@ -608,6 +645,31 @@ class TurnstileSolverTest(unittest.TestCase):
 
         with self.assertRaisesRegex(grok_protocol.GrokProtocolError, "Token not received"):
             solver.solve(website_url="https://accounts.x.ai/sign-up", sitekey="0x-test")
+
+    def test_local_solver_reserves_queue_time_for_last_short_attempt(self) -> None:
+        calls: list[dict] = []
+
+        def transport(_url: str, payload: dict, _headers: dict) -> dict:
+            calls.append(payload)
+            return {"solved": False, "error": "Token not received"}
+
+        solver = grok_protocol.TurnstileSolver(
+            {
+                "provider": "local",
+                "captcha_timeout": 24,
+                "local_attempt_timeout": 45,
+                "local_queue_timeout": 60,
+                "local_max_attempts": 1,
+            },
+            transport=transport,
+        )
+        self.addCleanup(solver.close)
+
+        with self.assertRaises(grok_protocol.GrokProtocolError):
+            solver.solve(website_url="https://accounts.x.ai/sign-up", sitekey="0x-test")
+
+        self.assertEqual(calls[0]["timeout_s"], 10)
+        self.assertEqual(calls[0]["queue_timeout_s"], 9)
 
     def test_yescaptcha_json_task_flow(self) -> None:
         calls: list[tuple[str, dict, dict]] = []

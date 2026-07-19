@@ -42,6 +42,10 @@ DEFAULT_GROK_CONFIG = {
     "request_timeout": 30,
     "captcha_timeout": 180,
     "captcha_poll_interval": 3,
+    "local_concurrency": 2,
+    "local_attempt_timeout": 45,
+    "local_queue_timeout": 60,
+    "local_max_attempts": 3,
     "castle_timeout": 20,
     "castle_pk": "",
     "castle_sdk_url": "",
@@ -436,10 +440,17 @@ def _normalize(raw: dict) -> dict:
         ("request_timeout", 1, 300),
         ("captcha_timeout", 10, 900),
         ("captcha_poll_interval", 1, 60),
+        ("local_concurrency", 1, 16),
+        ("local_attempt_timeout", 15, 120),
+        ("local_queue_timeout", 0, 300),
+        ("local_max_attempts", 1, 5),
         ("castle_timeout", 1, 300),
         ("grok2api_timeout", 1, 300),
     ):
-        grok[key] = max(minimum, min(maximum, int(grok.get(key) or DEFAULT_GROK_CONFIG[key])))
+        raw_value = grok.get(key)
+        if raw_value is None or raw_value == "":
+            raw_value = DEFAULT_GROK_CONFIG[key]
+        grok[key] = max(minimum, min(maximum, int(raw_value)))
     if not isinstance(grok.get("custom_headers"), dict):
         grok["custom_headers"] = {}
     cfg["grok"] = grok
@@ -502,6 +513,14 @@ class RegisterService:
         runtime["target"] = selected_target if selected_target in REGISTER_TARGETS else "openai"
         grok = runtime.get("grok") if isinstance(runtime.get("grok"), dict) else {}
         grok["max_mail_retry"] = int(grok.get("max_mail_retries") or 3)
+        if (
+            runtime["target"] == "grok"
+            and _safe_bool(grok.get("xai_cli_oauth_enabled"), True)
+            and _clean_text(grok.get("provider")).lower() == "local"
+        ):
+            threads = max(1, min(16, int(runtime.get("threads") or 1)))
+            configured_concurrency = max(1, min(16, int(grok.get("local_concurrency") or 1)))
+            grok["local_concurrency"] = min(16, max(configured_concurrency, threads + 1))
         runtime["grok"] = grok
         mail = runtime.get("mail") if isinstance(runtime.get("mail"), dict) else {}
         providers = mail.get("providers") if isinstance(mail.get("providers"), list) else []
@@ -763,6 +782,16 @@ class RegisterService:
                     f"Grok 注册任务已启动：共 {self._config['total']} 个，并发 {self._config['threads']}",
                     "yellow",
                 )
+                runtime_grok = backend.config.get("grok") if isinstance(backend.config.get("grok"), dict) else {}
+                if (
+                    _safe_bool(runtime_grok.get("xai_cli_oauth_enabled"), True)
+                    and _clean_text(runtime_grok.get("provider")).lower() == "local"
+                ):
+                    self._append_log(
+                        "Grok OAuth 即时上传已开启："
+                        f"注册成功后立即处理，solver 总槽位 {runtime_grok.get('local_concurrency')}",
+                        "yellow",
+                    )
             else:
                 self._append_log(
                     f"注册任务启动，平台={target}，模式={self._config['mode']}，线程数={self._config['threads']}",
@@ -1829,11 +1858,44 @@ class RegisterService:
                 "red",
             )
             return
-        state = "已接入" if bool(started.get("reused")) else "已启动"
+        if bool(started.get("reused")):
+            state = "已接入"
+        elif bool(started.get("queued")):
+            state = "已进入即时上传队列"
+        else:
+            state = "已启动"
         self._append_log(
             f"Grok OAuth 授权{state}：{self._mask_email(email)}",
             "yellow",
         )
+
+    def handle_grok_oauth_protocol_event(self, event: dict[str, Any]) -> None:
+        email = self._mask_email(_clean_text(event.get("email")))
+        if _clean_text(event.get("status")) != "authorized":
+            error = self._grok2api_error_text(RuntimeError(_clean_text(event.get("error")) or "未知错误"))
+            self._append_log(f"Grok OAuth 协议授权失败：{email}，原因: {error}", "red")
+            return
+
+        delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+        uploaded = [
+            name
+            for name, result in delivery.items()
+            if isinstance(result, dict) and _clean_text(result.get("status")) == "success"
+        ]
+        failed = [
+            name
+            for name, result in delivery.items()
+            if isinstance(result, dict) and _clean_text(result.get("status")) == "failed"
+        ]
+        if uploaded:
+            targets = "、".join("NovaApi" if name == "sub2api" else name.upper() for name in uploaded)
+            suffix = f"；{len(failed)} 个投递目标失败" if failed else ""
+            self._append_log(f"Grok OAuth 授权完成，已上传到 {targets}：{email}{suffix}", "green")
+        elif failed:
+            targets = "、".join("NovaApi" if name == "sub2api" else name.upper() for name in failed)
+            self._append_log(f"Grok OAuth 授权完成，但上传到 {targets} 失败：{email}", "red")
+        else:
+            self._append_log(f"Grok OAuth 授权完成，未启用外部投递：{email}", "yellow")
 
     def _append_log(self, text: str, color: str = "") -> None:
         with self._lock:
@@ -2487,3 +2549,7 @@ register_service = RegisterService(
     REGISTER_FILE,
     grok_oauth_protocol_sink=_start_xai_cli_oauth_protocol,
 )
+
+from services.xai_cli_oauth_service import xai_cli_oauth_service
+
+xai_cli_oauth_service.protocol_event_sink = register_service.handle_grok_oauth_protocol_event

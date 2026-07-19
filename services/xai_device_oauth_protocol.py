@@ -311,6 +311,12 @@ class XaiDeviceOAuthProtocol:
         if self.progress is not None:
             self.progress(str(stage), str(message))
 
+    def _turnstile_solver_config(self) -> dict[str, Any]:
+        config = dict(self.config)
+        if self.proxy and self.proxy.lower() != "direct":
+            config["proxy"] = self.proxy
+        return config
+
     def authorize(self, *, email: str, password: str) -> dict[str, Any]:
         clean_email = _clean_text(email)
         clean_password = _clean_text(password)
@@ -369,7 +375,7 @@ class XaiDeviceOAuthProtocol:
             self._emit("castle", "生成登录 Castle token")
             castle_token = client.create_castle_token(page_url=sign_in_url)
             self._emit("turnstile", "求解登录 Turnstile")
-            solver = TurnstileSolver(self.config)
+            solver = TurnstileSolver(self._turnstile_solver_config())
             turnstile_token = solver.solve(website_url=sign_in_url, sitekey=sitekey)
 
             self._emit("session", "提交 xAI 账号登录")

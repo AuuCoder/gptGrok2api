@@ -1,0 +1,22 @@
+services:
+  captcha-solver:
+    build:
+      context: ../captcha-solver
+      dockerfile: Dockerfile
+    image: chatgpt2api-captcha-solver:local
+    container_name: chatgpt2api-captcha-solver
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CAPTCHA_SOLVER_PORT:-8877}:8877"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TURNSTILE_HEADLESS: "0"
+      TURNSTILE_CONCURRENCY: "2"
+      SOLVER_ALLOW_PRIVATE: "1"
+      SOLVER_LOOPBACK_PROXY_HOST: "host.docker.internal"
+    volumes:
+      - cloakbrowser-cache:/root/.cloakbrowser
+
+volumes:
+  cloakbrowser-cache:

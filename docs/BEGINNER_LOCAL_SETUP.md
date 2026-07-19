@@ -248,7 +248,35 @@ curl -x http://127.0.0.1:40080 https://www.cloudflare.com/cdn-cgi/trace
 
 ## 7. 安装 Captcha Solver
 
-### 7.1 创建独立 Python 环境
+### 7.1 推荐方式：Docker/Xvfb 后台有头浏览器
+
+macOS 会把原生 Chromium 窗口强制放回可见屏幕。需要“有头模式但不弹窗”时，使用 Docker Desktop 中的 Linux Xvfb：
+
+```bash
+cd "$HOME/Documents/注册机/chatgpt2api"
+docker compose -f deploy/docker-compose.captcha-solver.yml build
+docker compose -f deploy/docker-compose.captcha-solver.yml up -d
+curl http://127.0.0.1:8877/health
+```
+
+容器设置了 `restart: unless-stopped`，Docker Desktop 启动后会自动恢复。浏览器下载保存在命名卷 `deploy_cloakbrowser-cache`，重建容器不会重复下载。
+
+注册代理如果是 `http://127.0.0.1:40080`，容器会自动转换成 `http://host.docker.internal:40080`，仍然访问 Mac 上的代理。
+
+常用维护命令：
+
+```bash
+docker compose -f deploy/docker-compose.captcha-solver.yml ps
+docker compose -f deploy/docker-compose.captcha-solver.yml logs -f
+docker compose -f deploy/docker-compose.captcha-solver.yml restart
+docker compose -f deploy/docker-compose.captcha-solver.yml down
+```
+
+不要同时加载后文的 solver LaunchAgent，否则两者会争用 `8877` 端口。
+
+### 7.2 备用方式：创建原生 Python 环境
+
+不使用 Docker 时可按下面方式运行，但 `TURNSTILE_HEADLESS=0` 会在 macOS 桌面显示 Chromium 窗口。
 
 ```bash
 cd "$HOME/Documents/注册机/chatgpt2api/captcha-solver"
@@ -262,7 +290,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -c 'import cloakbrowser, fastapi, uvicorn; print("solver dependencies ok")'
 ```
 
-### 7.2 Captcha Solver 重要环境变量
+### 7.3 Captcha Solver 重要环境变量
 
 | 变量 | 本机推荐值 | 说明 |
 | --- | --- | --- |
@@ -270,10 +298,13 @@ uv pip install --python .venv/bin/python -r requirements.txt
 | `SOLVER_ALLOW_PRIVATE` | `1` | Clash/fake-IP 常把公网域名解析到 `198.18.0.0/15`，会被 SSRF 防护误拦截 |
 | `TURNSTILE_PROXY` | 可留空 | 注册机会按次将当前注册代理透传给 solver |
 | `PORT` | `8877` | Solver HTTP 端口 |
+| `SOLVER_LOOPBACK_PROXY_HOST` | Docker 中为 `host.docker.internal` | 将容器内收到的本机回环代理转换到 Mac 宿主机 |
+
+16 GB Mac 建议注册线程和“注册解题并发”都从 `3` 开始。推荐参数：单次解题 `45` 秒、排队超时 `60` 秒、本地尝试 `3` 次、总解题超时 `180` 秒。开启即时 OAuth 后会自动增加第 4 个 solver 槽位。直接提高到 `5+` 通常会先耗尽 CPU 和压缩内存，成功率未必更高。
 
 `SOLVER_ALLOW_PRIVATE=1` 只应在 solver 绑定 `127.0.0.1` 时使用。不要在公网开放的 solver 上关闭 SSRF 保护。
 
-### 7.3 先手动启动测试
+### 7.4 原生方式手动启动测试
 
 ```bash
 cd "$HOME/Documents/注册机/chatgpt2api/captcha-solver"
@@ -297,13 +328,15 @@ curl http://127.0.0.1:8877/health
 
 按 `Control+C` 停止手动测试。
 
-### 7.4 首次浏览器下载
+### 7.5 首次浏览器下载
 
 首次真正解题时，CloakBrowser 会下载并校验 Chromium，日志会显示下载进度。只要最终出现 `Binary ready` 就是正常的。
 
 ## 8. 配置 macOS 开机自启
 
-项目提供了两个模板：
+主程序使用 LaunchAgent。Captcha Solver 如果已经按 7.1 使用 Docker，就不要再加载 solver LaunchAgent。
+
+项目提供了两个原生模板：
 
 - `deploy/launchd/com.chatgpt2api.app.plist.example`
 - `deploy/launchd/com.chatgpt2api.captcha-solver.plist.example`
@@ -319,7 +352,7 @@ sed "s|__APP_DIR__|$APP_DIR|g" \
 plutil -lint "$HOME/Library/LaunchAgents/com.chatgpt2api.app.plist"
 ```
 
-### 8.2 生成 solver plist
+### 8.2 仅原生方式：生成 solver plist
 
 ```bash
 APP_DIR="$HOME/Documents/注册机/chatgpt2api"
@@ -332,8 +365,15 @@ plutil -lint "$HOME/Library/LaunchAgents/com.chatgpt2api.captcha-solver.plist"
 
 ### 8.3 加载服务
 
+主程序始终加载：
+
 ```bash
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.chatgpt2api.app.plist"
+```
+
+只有选择原生 solver 时才执行：
+
+```bash
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.chatgpt2api.captcha-solver.plist"
 ```
 
@@ -350,15 +390,33 @@ launchctl bootout "gui/$(id -u)/com.chatgpt2api.captcha-solver"
 
 ```bash
 launchctl print "gui/$(id -u)/com.chatgpt2api.app"
-launchctl print "gui/$(id -u)/com.chatgpt2api.captcha-solver"
 curl -I http://127.0.0.1:8000/
 curl http://127.0.0.1:8877/health
+```
+
+Docker solver 额外检查：
+
+```bash
+docker compose -f "$HOME/Documents/注册机/chatgpt2api/deploy/docker-compose.captcha-solver.yml" ps
+```
+
+原生 solver 额外检查：
+
+```bash
+launchctl print "gui/$(id -u)/com.chatgpt2api.captcha-solver"
 ```
 
 常用重启命令：
 
 ```bash
 launchctl kickstart -k "gui/$(id -u)/com.chatgpt2api.app"
+```
+
+solver 根据实际方式二选一：
+
+```bash
+docker compose -f "$HOME/Documents/注册机/chatgpt2api/deploy/docker-compose.captcha-solver.yml" restart
+# 或者原生方式：
 launchctl kickstart -k "gui/$(id -u)/com.chatgpt2api.captcha-solver"
 ```
 
@@ -469,6 +527,7 @@ Turnstile 配置：
 | API Key | 本地模式不需要 |
 | API Base | `http://127.0.0.1:8877` |
 | HTTP 超时 | `30` |
+| 注册解题并发 | 与注册线程数相同，建议从 `1-3` 开始 |
 | 解题超时 | `180` |
 | 轮询间隔 | 本地模式基本不使用，保持 `3` |
 
@@ -509,40 +568,29 @@ Turnstile 配置：
 邮箱验证完成，正在进行安全校验
 安全校验完成，正在创建账号
 注册成功
+Grok OAuth 授权已进入即时上传队列
+Grok OAuth 授权完成，已上传到 NovaApi
 ```
 
-任务运行时会自动打开 Chromium 窗口。不需要人工点击，但不要强制关闭该窗口。
+使用本文的 Docker/Xvfb 部署时，Chromium 在虚拟显示器中运行，不会弹出本机浏览器窗口。
 
 ## 14. 并发和多线程
 
 ### 14.1 当前默认行为
 
-Captcha Solver 的 Turnstile 模块每个进程有一个全局 `asyncio.Lock`。这意味着：
+Captcha Solver 使用一个共享的动态并发限制器。配置中的“注册解题并发”表示注册任务可使用的浏览器槽位：
 
 - 注册机可以并发处理邮箱和网络步骤。
-- 单个 solver 进程中的 Turnstile 会排队。
-- 注册并发设为 `5` 不等于同时打开 5 个 Turnstile 浏览器。
+- 注册线程数为 `3`、注册解题并发为 `3` 时，最多同时运行 3 个注册 Turnstile。
+- 开启“注册后自动协议授权”后，程序会自动预留第 4 个槽位给单线程 OAuth 上传队列。
+- 注册成功后不再等待整批结束，而是立即依次完成 OAuth 和 NovaApi/CPA 投递。
+- 日志中的 `solver 总槽位 4` 是 `3 个注册槽位 + 1 个 OAuth 槽位`，不是配置被错误修改。
 
 首次搭建保持并发 `1`。稳定后可以增加到 `2-3`。
 
-### 14.2 真正的多 solver 并发
+### 14.2 资源占用
 
-可以在 solver LaunchAgent 的 `ProgramArguments` 中加入：
-
-```xml
-<string>--workers</string>
-<string>2</string>
-```
-
-放在端口参数后即可。然后重新加载 plist。
-
-注意：
-
-- 每个 worker 都可能启动独立 Chromium。
-- 内存、CPU 和代理压力会成倍增加。
-- `/logs` 和 `/status` 为进程内数据，多 worker 时不一定看到全部请求。
-- 建议 solver worker 数不高于注册并发数。
-- 建议从 `2` 开始，不要直接设为 `10`。
+每个活跃槽位都可能启动独立 Chromium。注册 3 线程并开启即时 OAuth 时，Docker 内存通常会比纯注册增加约一个浏览器实例。内存紧张时优先把注册线程和“注册解题并发”同时降为 `2`，不要启动多个 Uvicorn worker；多 worker 会拆散限流状态和 `/status` 数据。
 
 ## 15. OpenAI 注册说明
 

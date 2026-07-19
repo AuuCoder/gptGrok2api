@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,25 @@ _FETCH_JS = (
     " return {status: r.status, body: await r.text()};"
     " } catch(e) { return {status: 0, body: String(e)}; } }"
 )
+
+
+def _rewrite_loopback_proxy(proxy: str) -> str:
+    """Map a host-loopback proxy to Docker Desktop's host gateway when requested."""
+    replacement = str(os.getenv("SOLVER_LOOPBACK_PROXY_HOST") or "").strip()
+    if not proxy or not replacement:
+        return proxy
+
+    try:
+        parts = urlsplit(proxy)
+    except ValueError:
+        return proxy
+    if parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return proxy
+
+    userinfo = parts.netloc.rsplit("@", 1)[0] + "@" if "@" in parts.netloc else ""
+    host = f"[{replacement}]" if ":" in replacement and not replacement.startswith("[") else replacement
+    port = f":{parts.port}" if parts.port is not None else ""
+    return urlunsplit((parts.scheme, f"{userinfo}{host}{port}", parts.path, parts.query, parts.fragment))
 
 
 async def resolve_selector(page, selector: str, timeout: int = 10000):
@@ -86,12 +106,15 @@ def browser_kwargs(prefix: str, proxy: str = None) -> dict:
     the interactive-checkbox solvers (recaptcha/hcaptcha) default headless=0.
     """
     default_headless = "1" if prefix == "TURNSTILE" else "0"
-    kw = {"humanize": True,
-          "headless": os.getenv(f"{prefix}_HEADLESS", default_headless) != "0"}
+    headless = os.getenv(f"{prefix}_HEADLESS", default_headless) != "0"
+    kw = {"humanize": True, "headless": headless}
+    if not headless and os.getenv(f"{prefix}_HIDE_WINDOW") == "1":
+        kw["args"] = ["--window-position=-32000,-32000", "--window-size=1280,900"]
+        kw["_suppress_maximize"] = True
     configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
     if configured_proxy:
-        kw["proxy"] = configured_proxy
-    if os.getenv(f"{prefix}_GEOIP") == "1":
+        kw["proxy"] = _rewrite_loopback_proxy(configured_proxy)
+    if configured_proxy and os.getenv(f"{prefix}_GEOIP") == "1":
         kw["geoip"] = True
     return kw
 

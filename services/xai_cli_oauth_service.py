@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import threading
 import time
 import uuid
@@ -48,6 +49,24 @@ _REFRESH_EARLY_SECONDS = 60
 _DEVICE_SESSION_MAX_SECONDS = 1_800
 _ERROR_BODY_LIMIT = 1_200
 _PROTOCOL_JOB_TTL_SECONDS = 3_600
+_PROTOCOL_DEFER_POLL_SECONDS = 2.0
+_PROTOCOL_QUEUE_IDLE_SECONDS = 5.0
+_PROTOCOL_QUEUE_MAX_ATTEMPTS = 2
+_PROTOCOL_RETRY_STAGES = frozenset(
+    {
+        "approve",
+        "bootstrap",
+        "captcha",
+        "castle",
+        "consent",
+        "device_code",
+        "response",
+        "session",
+        "signin",
+        "token",
+        "turnstile",
+    }
+)
 AccountSelectedCallback = Callable[[dict[str, str]], None]
 
 
@@ -95,6 +114,9 @@ class XaiCliOAuthService:
         self._protocol_job_lock = threading.RLock()
         self._protocol_tasks: set[asyncio.Task[Any]] = set()
         self._protocol_threads: set[threading.Thread] = set()
+        self._protocol_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
+        self._protocol_queue_worker: threading.Thread | None = None
+        self.protocol_event_sink: Callable[[dict[str, Any]], None] | None = None
 
     def _client(self, *, proxy: str = "", timeout: float = 60.0) -> httpx.AsyncClient:
         kwargs: dict[str, Any] = {"timeout": httpx.Timeout(timeout, connect=min(timeout, 20.0))}
@@ -387,39 +409,134 @@ class XaiCliOAuthService:
         return result
 
     def start_protocol_authorization_background(self, account_id: str = "") -> dict[str, Any]:
-        """Start a protocol job from synchronous registration workers."""
+        """Queue protocol OAuth from synchronous registration workers."""
         result, source = self._prepare_protocol_authorization(account_id)
         if source is None:
             return result
 
         job_id = _clean_text(result["job"].get("id"))
-        runner = threading.Thread(
-            target=self._run_protocol_authorization_thread,
-            args=(job_id, source),
-            daemon=True,
-            name=f"xai-protocol-{job_id.removeprefix('xai-protocol-')[:8]}",
-        )
         with self._protocol_job_lock:
-            self._protocol_threads.add(runner)
-        runner.start()
+            worker = self._protocol_queue_worker
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(
+                    target=self._run_protocol_queue,
+                    daemon=True,
+                    name="xai-protocol-queue",
+                )
+                self._protocol_queue_worker = worker
+                worker.start()
+        self._protocol_queue.put((job_id, source))
+        result["queued"] = True
         return result
 
-    def _run_protocol_authorization_thread(self, job_id: str, source: dict[str, Any]) -> None:
+    @staticmethod
+    def _oauth_grok_config(runtime: dict[str, Any]) -> dict[str, Any]:
+        source = runtime.get("grok") if isinstance(runtime.get("grok"), dict) else {}
+        config = dict(source)
+        stats = runtime.get("stats") if isinstance(runtime.get("stats"), dict) else {}
         try:
-            asyncio.run(self._run_protocol_authorization(job_id, source))
-        finally:
-            with self._protocol_job_lock:
-                self._protocol_threads.discard(threading.current_thread())
+            running = int(stats.get("running") or 0)
+        except (TypeError, ValueError):
+            running = 0
+        registration_active = _clean_text(runtime.get("target")) == "grok" and (
+            bool(runtime.get("enabled")) or running > 0
+        )
+        if registration_active and _clean_text(config.get("provider")).lower() == "local":
+            try:
+                threads = max(1, min(16, int(runtime.get("threads") or 1)))
+            except (TypeError, ValueError):
+                threads = 1
+            try:
+                configured = max(1, min(16, int(config.get("local_concurrency") or 1)))
+            except (TypeError, ValueError):
+                configured = 1
+            config["local_concurrency"] = min(16, max(configured, threads + 1))
+        return config
 
-    async def _run_protocol_authorization(self, job_id: str, source: dict[str, Any]) -> None:
+    @staticmethod
+    def _resolve_registration_proxy(raw_proxy: object) -> str:
+        """Use the same upstream proxy selection as Grok registration workers."""
+        from services.proxy_service import proxy_settings
+
+        profile = proxy_settings.get_profile(proxy=_clean_text(raw_proxy), upstream=True)
+        return _clean_text(profile.proxy_url) or "direct"
+
+    def _emit_protocol_event(self, payload: dict[str, Any]) -> None:
+        sink = self.protocol_event_sink
+        if sink is None:
+            return
+        try:
+            sink(dict(payload))
+        except Exception:
+            pass
+
+    def _run_protocol_queue(self) -> None:
+        while True:
+            try:
+                job_id, source = self._protocol_queue.get(timeout=_PROTOCOL_QUEUE_IDLE_SECONDS)
+            except queue.Empty:
+                with self._protocol_job_lock:
+                    if self._protocol_queue.empty():
+                        self._protocol_queue_worker = None
+                        return
+                continue
+            try:
+                runner = threading.current_thread()
+                with self._protocol_job_lock:
+                    self._protocol_threads.add(runner)
+                try:
+                    for attempt in range(1, _PROTOCOL_QUEUE_MAX_ATTEMPTS + 1):
+                        asyncio.run(
+                            self._run_protocol_authorization(
+                                job_id,
+                                source,
+                                notify_failure=False,
+                            )
+                        )
+                        with self._protocol_job_lock:
+                            job = dict(self._protocol_jobs.get(job_id) or {})
+                        if _clean_text(job.get("status")) != "failed":
+                            break
+                        stage = _clean_text(job.get("stage"))
+                        if attempt >= _PROTOCOL_QUEUE_MAX_ATTEMPTS or stage not in _PROTOCOL_RETRY_STAGES:
+                            self._emit_protocol_event(
+                                {
+                                    "status": "failed",
+                                    "source_account_id": _clean_text(source.get("id")),
+                                    "email": _clean_text(source.get("email")),
+                                    "error": _clean_text(job.get("error")),
+                                }
+                            )
+                            break
+                        self._update_protocol_job(
+                            job_id,
+                            status="pending",
+                            stage="queued",
+                            message=f"协议授权瞬时失败，准备重试（{attempt + 1}/{_PROTOCOL_QUEUE_MAX_ATTEMPTS}）",
+                            error="",
+                        )
+                        time.sleep(_PROTOCOL_DEFER_POLL_SECONDS)
+                finally:
+                    with self._protocol_job_lock:
+                        self._protocol_threads.discard(runner)
+            finally:
+                self._protocol_queue.task_done()
+
+    async def _run_protocol_authorization(
+        self,
+        job_id: str,
+        source: dict[str, Any],
+        *,
+        notify_failure: bool = True,
+    ) -> None:
         from services.register_service import register_service
         from services.xai_device_oauth_protocol import XaiDeviceOAuthProtocol
         from services.xai_oauth_delivery_service import deliver_xai_oauth_account
 
         self._update_protocol_job(job_id, status="running", stage="bootstrap", message="发现当前 Castle SDK 和登录参数")
         runtime = register_service.get()
-        grok_config = runtime.get("grok") if isinstance(runtime.get("grok"), dict) else {}
-        proxy = _clean_text(runtime.get("proxy")) or "direct"
+        grok_config = self._oauth_grok_config(runtime)
+        proxy = self._resolve_registration_proxy(runtime.get("proxy"))
 
         def progress(stage: str, message: str) -> None:
             self._update_protocol_job(job_id, status="running", stage=stage, message=message)
@@ -487,6 +604,14 @@ class XaiCliOAuthService:
                 models=imported.get("models") if isinstance(imported.get("models"), list) else [],
                 delivery=delivery,
             )
+            self._emit_protocol_event(
+                {
+                    "status": "authorized",
+                    "source_account_id": _clean_text(source.get("id")),
+                    "email": _clean_text(source.get("email")),
+                    "delivery": delivery,
+                }
+            )
         except Exception as exc:
             error = _clean_text(exc) or type(exc).__name__
             for secret in (_clean_text(source.get("email")), _clean_text(source.get("password"))):
@@ -499,6 +624,15 @@ class XaiCliOAuthService:
                 message="协议授权失败",
                 error=error[:500],
             )
+            if notify_failure:
+                self._emit_protocol_event(
+                    {
+                        "status": "failed",
+                        "source_account_id": _clean_text(source.get("id")),
+                        "email": _clean_text(source.get("email")),
+                        "error": error[:500],
+                    }
+                )
 
     def get_protocol_authorization_job(self, job_id: str) -> dict[str, Any] | None:
         clean_id = _clean_text(job_id)

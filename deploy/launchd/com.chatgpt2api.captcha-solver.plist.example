@@ -26,6 +26,10 @@
     <string>1</string>
     <key>TURNSTILE_HEADLESS</key>
     <string>0</string>
+    <key>TURNSTILE_HIDE_WINDOW</key>
+    <string>1</string>
+    <key>TURNSTILE_CONCURRENCY</key>
+    <string>2</string>
   </dict>
 
   <key>RunAtLoad</key>

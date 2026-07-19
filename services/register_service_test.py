@@ -901,9 +901,43 @@ class RegisterServiceGrokTest(unittest.TestCase):
 
         local = _normalize({"target": "grok", "grok": {"provider": "local"}})
         self.assertEqual(local["grok"]["provider"], "local")
+        self.assertEqual(local["grok"]["local_concurrency"], 2)
+        self.assertEqual(local["grok"]["local_attempt_timeout"], 45)
+        self.assertEqual(local["grok"]["local_queue_timeout"], 60)
+        self.assertEqual(local["grok"]["local_max_attempts"], 3)
+
+        clamped = _normalize({"target": "grok", "grok": {"provider": "local", "local_concurrency": 99}})
+        self.assertEqual(clamped["grok"]["local_concurrency"], 16)
+
+        no_queue = _normalize({"target": "grok", "grok": {"local_queue_timeout": 0}})
+        self.assertEqual(no_queue["grok"]["local_queue_timeout"], 0)
 
         disabled = _normalize({"target": "grok", "grok": {"xai_cli_oauth_enabled": False}})
         self.assertFalse(disabled["grok"]["xai_cli_oauth_enabled"])
+
+    def test_grok_runtime_reserves_one_solver_slot_for_immediate_oauth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_file = Path(temp_dir) / "register.json"
+            store_file.write_text(
+                json.dumps(
+                    {
+                        "target": "grok",
+                        "threads": 3,
+                        "grok": {
+                            "provider": "local",
+                            "local_concurrency": 3,
+                            "xai_cli_oauth_enabled": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = RegisterService(store_file)
+
+            runtime = service._runtime_config("grok")
+
+        self.assertEqual(runtime["grok"]["local_concurrency"], 4)
+        self.assertEqual(service.get()["grok"]["local_concurrency"], 3)
 
     def test_successful_grok_registration_starts_default_oauth_protocol(self) -> None:
         protocol_calls: list[str] = []

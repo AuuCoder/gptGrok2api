@@ -490,6 +490,19 @@
           />
         </label>
 
+        <label v-if="config.grok.provider === 'local'" class="register-field">
+          <span class="register-label">注册解题并发</span>
+          <Input
+            v-model.number="config.grok.local_concurrency"
+            type="number"
+            min="1"
+            max="16"
+            step="1"
+            block
+            :disabled="config.enabled"
+          />
+        </label>
+
         <label class="register-field">
           <span class="register-label">解题超时（秒）</span>
           <Input

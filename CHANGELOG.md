@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.6 - 2026-07-20
+
++ [新增] macOS 本地 Captcha Solver 支持 Docker/Xvfb 运行有头 Chromium，浏览器不再弹到桌面，并提供 Compose、缓存持久化和一键启动脚本。
++ [优化] Turnstile 从全局单锁升级为共享动态并发限制器；注册中心可配置注册解题并发、单次解题超时、排队超时和本地尝试次数。
++ [优化] 浏览器上下文和 CloakBrowser 进程在成功、失败与超时后统一释放，降低批量注册时的内存、PID 和残留 Chromium 数量。
++ [修复] Grok Device Code OAuth 复用注册任务的真实代理，并将代理继续透传给登录 Turnstile，修复 OAuth `sign-in` 实际走直连导致的 `600010` 和持续无 token。
++ [变更] Grok 注册成功后立即进入单线程 OAuth 上传队列，不再等待整批注册结束；注册运行时自动预留一个额外 solver 槽位，注册线程与上传互不串行。
++ [优化] OAuth 的 Turnstile、登录、consent 和 token 等瞬时失败自动有限重试；授权队列保持单线程，避免多个 OAuth `sign-in` 同时争抢浏览器资源。
++ [新增] NovaApi 与 CPA 在 OAuth 完成后按启用配置并行即时投递，分别记录成功、失败或跳过状态，并在注册日志中显示明确终态。
++ [文档] 更新 README、macOS/Ubuntu 从零部署、NovaApi/CPA 自动上传和日志排错教程，说明 Docker/Xvfb、即时上传、额外 OAuth 槽位及内存调优方式。
+
 ## 1.0.5 - 2026-07-19
 
 + [修复] OpenAI 注册默认切回 `PlatformRegistrar`，对齐上游最新 authorize/passwordless signup 链路，保留传统密码流程作为显式回退。

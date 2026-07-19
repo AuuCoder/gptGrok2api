@@ -264,7 +264,31 @@ WARNING: No supported WebSocket library detected.
 
 这通常不是 Turnstile 失败的决定性原因。如果 `/health` 正常且 `/solve` 最终返回 `solved:true`，可以先忽略。只有业务明确需要 solver WebSocket 接口时才需要额外安装 `websockets` 或 `wsproto`；当前 `/solve` 使用普通 HTTP。
 
-### 4.9 端口被占用
+### 4.9 macOS Chromium 窗口反复弹出
+
+现象：开启多线程后，桌面不断出现 `about:blank` Chromium 窗口或 Dock 图标。
+
+原因：xAI Turnstile 需要 `TURNSTILE_HEADLESS=0`，macOS 又会把原生窗口强制钳制回可见屏幕，负坐标参数不能保证隐藏。
+
+处理：改用 Docker/Xvfb 运行 solver，浏览器仍为有头模式，但只绘制到容器虚拟屏幕：
+
+```bash
+launchctl bootout "gui/$(id -u)/com.chatgpt2api.captcha-solver" 2>/dev/null || true
+cd "$HOME/Documents/注册机/chatgpt2api"
+docker compose -f deploy/docker-compose.captcha-solver.yml up -d --build
+curl http://127.0.0.1:8877/health
+```
+
+确认宿主机没有原生 CloakBrowser，容器内存在 Chromium：
+
+```bash
+ps -ax | grep '/.cloakbrowser/.*/Chromium.app/'
+docker exec chatgpt2api-captcha-solver ps aux
+```
+
+不要同时运行原生 solver LaunchAgent 和 Docker solver。
+
+### 4.10 端口被占用
 
 日志示例：
 
@@ -285,7 +309,7 @@ sudo ss -lntp | grep ':8877'
 
 确认是否同时启动了旧 solver、手动 Uvicorn 和开机服务。不要直接对未知进程使用 `kill -9`。
 
-### 4.10 OpenAI 注册成功，但 NovaApi 同步失败
+### 4.11 OpenAI 注册成功，但 NovaApi 同步失败
 
 日志：
 
@@ -303,12 +327,13 @@ Sub2API 同步未成功，本地账号已保留：Sub2API 同步账号失败（H
 - 管理员邮箱/密码或 Admin API Key 是否正确。
 - 目标 OpenAI 分组是否存在，或改用自定义分组。
 
-### 4.11 Grok 注册成功，但 NovaApi/CPA 没有账号
+### 4.12 Grok 注册成功，但 NovaApi/CPA 没有账号
 
 日志示例：
 
 ```text
 注册成功
+Grok OAuth 授权已进入即时上传队列
 xAI Device Code OAuth 协议授权失败
 ```
 
@@ -320,13 +345,22 @@ xAI Device Code OAuth 协议授权失败
 
 前者表示没有得到可投递的 xAI OAuth 凭据；后者表示 OAuth 已保存到本地，但至少一个远程目标失败。
 
+正常即时上传应在注册成功后继续出现：
+
+```text
+Grok OAuth 授权已进入即时上传队列
+Grok OAuth 授权完成，已上传到 NovaApi
+```
+
+如果长时间只有“已进入即时上传队列”，检查 solver `/status` 是否出现 `sign-in`，并确认启动日志显示 `solver 总槽位 = 注册线程数 + 1`。没有 `sign-in` 通常表示 OAuth worker 没有消费队列；出现 `sign-in` 后失败则继续查看 Turnstile 或 Device Code 阶段错误。
+
 分别检查：
 
 - “注册后自动协议授权”是否开启。
 - NovaApi 的 xAI 分组、管理员认证和魔改镜像。
 - CPA 根地址、远程管理密钥和 `/v0/management/auth-files` 接口。
 
-### 4.12 NovaApi 401/403/404/422
+### 4.13 NovaApi 401/403/404/422
 
 ```text
 HTTP 401 / 403
@@ -348,7 +382,7 @@ docker inspect sub2api --format '{{.Config.Image}}'
 
 应返回 `auucoder/novaapi:local` 或作者明确发布的魔改镜像。
 
-### 4.13 CPA 上传失败
+### 4.14 CPA 上传失败
 
 日志示例：
 

@@ -4,6 +4,7 @@ import json
 import unittest
 
 from services.xai_device_oauth_protocol import (
+    XaiDeviceOAuthProtocol,
     XaiDeviceOAuthProtocolError,
     parse_device_consent_form,
 )
@@ -108,6 +109,16 @@ class DeviceConsentFormTest(unittest.TestCase):
                 base_url="https://accounts.x.ai/oauth2/device/consent",
                 user_code="ABCD-EFGH",
             )
+
+    def test_turnstile_solver_reuses_protocol_proxy(self) -> None:
+        protocol = XaiDeviceOAuthProtocol({}, proxy="socks5h://proxy.example:1080")
+        self.assertEqual(
+            protocol._turnstile_solver_config()["proxy"],
+            "socks5h://proxy.example:1080",
+        )
+
+        direct = XaiDeviceOAuthProtocol({}, proxy="direct")
+        self.assertNotIn("proxy", direct._turnstile_solver_config())
 
 
 if __name__ == "__main__":

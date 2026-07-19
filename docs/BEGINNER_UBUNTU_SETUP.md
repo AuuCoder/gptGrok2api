@@ -586,40 +586,27 @@ curl -I http://127.0.0.1:8788/login
 
 ## 17. 并发和多 worker
 
-每个 Captcha Solver worker 的 Turnstile 模块中有一个 `asyncio.Lock`。因此同一 worker 内的 Grok Turnstile 请求会串行排队；启动多个 Uvicorn worker 后，每个 worker 可以各自处理一个请求。
+Captcha Solver 使用共享动态并发限制器，不需要为了 Turnstile 并发启动多个 Uvicorn worker。注册中心的“注册解题并发”表示注册任务可用槽位；开启 Grok 自动协议授权后，程序会再预留一个 OAuth 槽位。
 
 推荐步骤：
 
 1. 先用注册并发 `1`。
 2. 连续成功后改为 `2`。
-3. 确认 CPU/RAM 充足后再增加 solver worker。
-
-在 `/etc/systemd/system/captcha-solver.service` 的 `ExecStart` 末尾添加：
-
-```text
---workers 2
-```
-
-然后：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart captcha-solver
-```
+3. 16 GB 以上服务器可尝试注册线程 `3`、注册解题并发 `3`；启用即时 OAuth 后实际 solver 总槽位为 `4`。
 
 注意：
 
-- 每个 worker 都可能启动独立 Chromium。
-- 不要让 worker 数高于注册并发数。
-- 建议从 `2` 开始。
-- 多 worker 时 `/logs` 只反映处理当前请求的某个进程，不是聚合日志。
+- 每个活跃槽位都可能启动独立 Chromium。
+- 内存紧张时把注册线程和注册解题并发同时降为 `2`，即时 OAuth 会使用第 3 个槽位。
+- 不建议设置 `--workers 2+`；多进程会拆散并发状态和 `/status` 数据，并放大内存占用。
+- 注册成功后应立即出现“Grok OAuth 授权已进入即时上传队列”，随后显示 NovaApi/CPA 投递终态。
 
 ## 18. 自动上传到 NovaApi（Sub2API）和 CPA
 
 本系统支持：
 
 - OpenAI 注册成功后自动同步到 NovaApi，并可同时上传到 CPA。
-- Grok 完成 xAI OAuth 协议授权后，同时或分别上传到 NovaApi 和 CPA。
+- Grok 每个账号注册成功后立即执行 xAI OAuth，并同时或分别上传到 NovaApi 和 CPA，不等待整批任务结束。
 
 Sub2API 必须优先使用项目作者魔改版 [AuuCoder/NovaApi](https://github.com/AuuCoder/NovaApi)。该仓库默认 Compose 仍可能引用普通上游镜像，因此不能只克隆仓库后直接启动。
 

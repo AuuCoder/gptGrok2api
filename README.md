@@ -23,10 +23,10 @@ GPTGrok2API 是一个自托管的 GPT 与 Grok 统一网关，将已接入的订
 | iCloud 定时创建 | 按 Apple 账号定时创建邮箱；新接口每小时最多 20 个、旧接口每小时最多 5 个，每账号累计 750 个后自动停止。sidecar 使用 Compose 内部网络，不需要独立账号或宿主机端口。 |
 | 邮箱平台标签 | 同一邮箱可分别标记 GPT 和 Grok；GPT 标签为绿色、Grok 标签为蓝色，两个标签同时存在才算已使用，注册领取按目标平台隔离。 |
 | 注册中心 | 支持 OpenAI 与 Grok 注册任务，整合临时邮箱、GPTMail、Outlook Token、Microsoft Alias 和 iCloud Privacy Mail；内置 iCloud provider 不需要填写域名、API Base 或 API Key。 |
-| 本地 Captcha Solver | 源码内置于 `captcha-solver/`，使用 CloakBrowser/Chromium 处理 Grok Turnstile 实页校验，支持注册代理按请求透传，不需要额外克隆第二个仓库。 |
+| 本地 Captcha Solver | 源码内置于 `captcha-solver/`，使用 Docker/Xvfb 中的有头 CloakBrowser/Chromium 处理 Grok Turnstile，支持动态并发、代理透传和浏览器资源回收，不需要额外克隆第二个仓库。 |
 | Checkout 提链 | 注册 Checkout 仅保留 UPI 最终支付链接提取；IN Checkout、Provider、Approve 共享同一 sticky 出口，VN Promotion 使用独立代理持续轮换重试。 |
 | 代理与稳定出口 | 支持全局代理、账号代理、代理配置、代理组、节点并发限制、故障反馈、备用出口、WARP、Privoxy、FlareSolverr 和 Clearance 刷新。 |
-| 外部系统接入 | 支持从 Sub2API、远程 CPA、本地 CPA 和 Access Token 导入账号；OpenAI/Grok 注册后可自动投递 NovaApi 和 CPA；服务器部署提供 `gptgrok2api` Docker 网络别名。 |
+| 外部系统接入 | 支持从 Sub2API、远程 CPA、本地 CPA 和 Access Token 导入账号；Grok 注册成功后立即顺序完成 OAuth，并按配置并行投递 NovaApi 与 CPA；服务器部署提供 `gptgrok2api` Docker 网络别名。 |
 | 管理控制台 | 提供概览、GPT/Grok 账号管理、Grok Runtime、iCloud 邮箱、注册任务、Checkout 任务、代理管理、日志、实时监控、图片管理、调试中心和系统设置。 |
 | 存储与备份 | 账号数据支持 JSON、SQLite、PostgreSQL 和 Git 后端；图片支持本地与 WebDAV；备份支持本地归档和 R2。 |
 | 运维与发布 | 支持 Docker Compose、WARP 编排、内置 sidecar、Nginx HTTPS、运行日志、指标趋势、健康检查和 GitHub Releases 更新源。 |
@@ -59,7 +59,7 @@ uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-macOS 使用 `deploy/launchd/com.chatgpt2api.captcha-solver.plist.example`，Ubuntu/Linux 使用 `deploy/systemd/captcha-solver.service.example`。两份模板都默认从 `<项目目录>/captcha-solver` 启动，详细步骤见 macOS/Ubuntu 新手手册。
+macOS 需要“有头但不弹窗”时，推荐使用 `deploy/docker-compose.captcha-solver.yml` 在 Docker/Xvfb 中运行；原生 LaunchAgent 会显示 Chromium 窗口。Ubuntu/Linux 使用 `deploy/systemd/captcha-solver.service.example`。详细步骤见 macOS/Ubuntu 新手手册。
 
 ## 系统结构
 
@@ -114,6 +114,7 @@ curl https://pro.muyuai.top/v1/chat/completions \
 服务模板：
 
 - macOS：[主程序 LaunchAgent](deploy/launchd/com.chatgpt2api.app.plist.example) / [Captcha Solver LaunchAgent](deploy/launchd/com.chatgpt2api.captcha-solver.plist.example)
+- macOS 隐藏有头浏览器：[Captcha Solver Docker/Xvfb Compose](deploy/docker-compose.captcha-solver.yml)
 - Ubuntu：[主程序 systemd unit](deploy/systemd/chatgpt2api.service.example) / [Captcha Solver systemd unit](deploy/systemd/captcha-solver.service.example)
 
 ## Docker 部署

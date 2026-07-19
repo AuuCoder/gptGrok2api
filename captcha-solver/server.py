@@ -106,6 +106,10 @@ def _log_solve(type_: str, sitekey: Optional[str], url: str, result: dict):
         "error": result.get("error"),
         "elapsed": result.get("elapsed"),
         "method": result.get("method"),
+        "phase": result.get("phase"),
+        "queue_wait": result.get("queue_wait"),
+        "concurrency": result.get("concurrency"),
+        "clicks": result.get("clicks"),
         "timestamp": time.time(),
         "success": solved and not result.get("error"),
     })
@@ -189,14 +193,20 @@ class SolveRequest(BaseModel):
     real_page: Optional[bool] = Field(
         False, description="Solve on the live target page (navigate + drive) instead of a stub.")
     timeout_s: Optional[int] = Field(
-        60, description="Overall solve deadline (seconds). Enforced server-side; on expiry the "
-        "call returns 408 and the browser is released.")
+        60, description="Active browser solve deadline (seconds). Turnstile queue waiting uses "
+        "queue_timeout_s separately.")
+    queue_timeout_s: Optional[int] = Field(
+        60, ge=0, le=300, description="Turnstile-only maximum wait for a browser concurrency slot. "
+        "This does not consume timeout_s.")
     pre_actions: Optional[list[PreAction]] = Field(None, description="Steps to run before solving (real_page).")
     post_fetch: Optional[list[PostFetch]] = Field(None, description="API calls after solving (real_page).")
     proxy: Optional[str] = Field(
         None, description="Per-request proxy (scheme://user:pass@host:port). Honored for "
         "type=turnstile, cloudflare and awswaf (overrides the shared TURNSTILE_PROXY env fallback). "
         "For reCAPTCHA set RECAPTCHA_PROXY instead.")
+    concurrency: Optional[int] = Field(
+        None, ge=1, le=16, description="Turnstile-only maximum simultaneous browser attempts. "
+        "Overrides TURNSTILE_CONCURRENCY for requests using the same limit.")
 
     # reCAPTCHA-only
     version: Optional[str] = Field(None, description="reCAPTCHA only: v2 | v3 | invisible (default v2).")
@@ -352,14 +362,17 @@ async def _dispatch(req: SolveRequest) -> dict:
             if req.verify_url and req.verify_payload:
                 r = await solve_and_verify(
                     req.sitekey, req.verify_url, req.verify_payload, req.action,
-                    cdata=req.cdata, page_url=req.page_url, proxy=req.proxy)
+                    cdata=req.cdata, page_url=req.page_url, proxy=req.proxy,
+                    concurrency=req.concurrency)
             elif req.real_page:
                 actions, fetches = _extract(req)
                 r = await solve_turnstile_realpage(
-                    req.url, req.sitekey, req.timeout_s, actions, fetches, req.proxy)
+                    req.url, req.sitekey, req.timeout_s, actions, fetches, req.proxy,
+                    req.action, req.cdata, req.concurrency, req.queue_timeout_s)
             else:
                 r = await solve_turnstile(
-                    req.sitekey, req.url, req.action, req.cdata, req.proxy)
+                    req.sitekey, req.url, req.action, req.cdata, req.proxy,
+                    req.concurrency)
         except TimeoutError as e:
             r = {"token": "", "error": str(e), "method": "route"}
         return {"type": "turnstile", **r}
@@ -492,7 +505,11 @@ async def solve(req: SolveRequest = Body(..., openapi_examples=_SOLVE_EXAMPLES))
     _validate_urls(req)
 
     sk = req.sitekey or ""  # cloudflare has no sitekey
-    log.info("Solve: type=%s sitekey=%s url=%s", req.type, sk[:12], req.url)
+    log.info(
+        "Solve: type=%s sitekey=%s real_page=%s proxy=%s concurrency=%s timeout_s=%s url=%s",
+        req.type, sk[:12], bool(req.real_page), bool(req.proxy), req.concurrency,
+        req.timeout_s, req.url,
+    )
 
     task_id = next(_task_ids)
     _solve_current[task_id] = {
@@ -500,25 +517,46 @@ async def solve(req: SolveRequest = Body(..., openapi_examples=_SOLVE_EXAMPLES))
         "sitekey": sk[:12] + ("..." if len(sk) > 12 else ""),
         "url": req.url[:60] + ("..." if len(req.url) > 60 else ""),
         "version": req.version or None,
+        "real_page": bool(req.real_page),
+        "proxy": bool(req.proxy),
+        "concurrency": req.concurrency,
+        "timeout_s": req.timeout_s,
+        "queue_timeout_s": req.queue_timeout_s,
         "started_at": time.time(),
     }
+    started_monotonic = time.monotonic()
     try:
         # Global deadline: a hung browser can't wedge the per-type lock forever — the
         # timeout cancels the coroutine, releasing the lock (caller sees 408). A solver's
         # own no-token TimeoutError is caught INSIDE _dispatch, so a bare TimeoutError
         # here is only ever the real deadline.
-        async with asyncio.timeout(req.timeout_s or 60):
+        request_deadline = req.timeout_s or 60
+        if req.type == "turnstile" and req.real_page:
+            request_deadline += max(0, int(req.queue_timeout_s or 0)) + 5
+        async with asyncio.timeout(request_deadline):
             result = await _dispatch(req)
         # ONE success signal for every type — callers read result["solved"], never branch.
         result["solved"] = _is_solved(result)
         _log_solve(req.type, req.sitekey, req.url, result)
         return result
     except (TimeoutError, asyncio.TimeoutError):
-        raise HTTPException(408, f"solve timed out after {req.timeout_s or 60}s")
+        _log_solve(req.type, req.sitekey, req.url, {
+            "error": f"solve request timed out after {request_deadline}s",
+            "elapsed": round(time.monotonic() - started_monotonic, 1),
+            "method": "real-page" if req.real_page else "deadline",
+            "phase": "deadline",
+        })
+        raise HTTPException(408, f"solve request timed out after {request_deadline}s")
     except HTTPException:
         raise
     except Exception as e:
         log.error("Solve failed: %s", e, exc_info=True)
+        _log_solve(req.type, req.sitekey, req.url, {
+            "error": str(e),
+            "elapsed": round(time.monotonic() - started_monotonic, 1),
+            "method": "real-page" if req.real_page else "exception",
+            "phase": "exception",
+        })
         raise HTTPException(500, str(e))
     finally:
         _solve_current.pop(task_id, None)

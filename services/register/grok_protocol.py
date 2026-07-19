@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -822,7 +823,7 @@ class TurnstileSolver:
                 f"Turnstile provider HTTP {response.status_code}: "
                 f"{data.get('errorDescription') or data.get('error') or data.get('detail') or ''}",
                 stage="captcha",
-                retryable=response.status_code >= 500,
+                retryable=response.status_code in {408, 409, 425, 429} or response.status_code >= 500,
             )
         return data
 
@@ -836,29 +837,65 @@ class TurnstileSolver:
     def solve(self, *, website_url: str, sitekey: str, action: str = "") -> str:
         if self.provider == "local":
             base_url = str(self.config.get("api_base") or "http://127.0.0.1:8877").strip().rstrip("/")
-            payload: dict[str, Any] = {
-                "type": "turnstile",
-                "url": website_url,
-                "sitekey": sitekey,
-                "real_page": bool(self.config.get("local_real_page", True)),
-                "timeout_s": max(10, int(self.timeout)),
-            }
-            if action:
-                payload["action"] = action
-            proxy = str(self.config.get("proxy") or "").strip()
-            if proxy and proxy.lower() != "direct":
-                payload["proxy"] = proxy
-            result = self._post(
-                f"{base_url}/solve",
-                payload,
-                timeout=max(self.request_timeout, self.timeout + 5),
+            max_attempts = max(1, min(5, int(self.config.get("local_max_attempts") or 3)))
+            attempt_timeout = max(15, min(120, int(self.config.get("local_attempt_timeout") or 60)))
+            queue_timeout_raw = self.config.get("local_queue_timeout")
+            queue_timeout = max(
+                0,
+                min(300, int(60 if queue_timeout_raw is None else queue_timeout_raw)),
             )
-            token = str(result.get("token") or "").strip()
-            if result.get("solved") is True and token:
-                return token
-            error = str(result.get("error") or result.get("detail") or "").strip()
+            concurrency = max(1, min(16, int(self.config.get("local_concurrency") or 2)))
+            proxy = str(self.config.get("proxy") or "").strip()
+            deadline = time.monotonic() + self.timeout
+            last_error = ""
+            attempts = 0
+            for attempt in range(1, max_attempts + 1):
+                remaining = deadline - time.monotonic()
+                if remaining < 10:
+                    break
+                attempts = attempt
+                remaining_seconds = max(0, int(math.ceil(remaining)))
+                current_timeout = max(10, min(attempt_timeout, remaining_seconds - 5))
+                current_queue_timeout = max(
+                    0,
+                    min(queue_timeout, max(0, remaining_seconds - current_timeout - 5)),
+                )
+                if queue_timeout > 0 and current_queue_timeout == 0 and remaining_seconds > 15:
+                    current_queue_timeout = min(queue_timeout, 10, remaining_seconds - 15)
+                    current_timeout = max(10, remaining_seconds - current_queue_timeout - 5)
+                payload: dict[str, Any] = {
+                    "type": "turnstile",
+                    "url": website_url,
+                    "sitekey": sitekey,
+                    "real_page": bool(self.config.get("local_real_page", True)),
+                    "timeout_s": current_timeout,
+                    "queue_timeout_s": current_queue_timeout,
+                    "concurrency": concurrency,
+                }
+                if action:
+                    payload["action"] = action
+                if proxy and proxy.lower() != "direct":
+                    payload["proxy"] = proxy
+                try:
+                    result = self._post(
+                        f"{base_url}/solve",
+                        payload,
+                        timeout=max(
+                            self.request_timeout,
+                            current_timeout + current_queue_timeout + 10,
+                        ),
+                    )
+                except GrokProtocolError as exc:
+                    last_error = str(exc)
+                    if not exc.retryable or attempt >= max_attempts:
+                        raise
+                    continue
+                token = str(result.get("token") or "").strip()
+                if result.get("solved") is True and token:
+                    return token
+                last_error = str(result.get("error") or result.get("detail") or "").strip()
             raise GrokProtocolError(
-                f"本地 Turnstile 求解失败: {error or '未返回 token'}",
+                f"本地 Turnstile 求解失败（{attempts or 1} 次尝试）: {last_error or '未返回 token'}",
                 stage="captcha",
                 retryable=True,
             )

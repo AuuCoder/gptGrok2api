@@ -121,8 +121,32 @@ browser.
 | ----------------------- | ------- | ------------------------------------------- |
 | `PORT`                  | `8877`  | Listen port                                 |
 | `TURNSTILE_HEADLESS`    | `1`     | `0` = run Turnstile headed                  |
+| `TURNSTILE_HIDE_WINDOW` | unset   | `1` = request an off-screen headed window (window managers may clamp it back on-screen) |
+| `SOLVER_LOOPBACK_PROXY_HOST` | unset | Rewrite `127.0.0.1`/`localhost` in per-request proxies, normally `host.docker.internal` inside Docker Desktop |
+
+For a 16 GB Mac, start Grok registration at 3 worker threads and local
+concurrency 3. The tuned defaults use a 45-second active solve budget, a
+separate 60-second queue budget, and up to 3 browser attempts. Queue waiting no
+longer consumes the active browser solve deadline.
+
+### macOS: headed mode without desktop windows
+
+macOS clamps native Chromium windows back onto a visible display. For a truly
+background headed browser, run the solver in Docker Desktop with Linux Xvfb:
+
+```bash
+docker compose -f deploy/docker-compose.captcha-solver.yml build
+docker compose -f deploy/docker-compose.captcha-solver.yml up -d
+curl http://127.0.0.1:8877/health
+```
+
+The browser remains headed inside the container's virtual display. The Compose
+service persists CloakBrowser downloads in a named volume and rewrites a
+per-request proxy such as `http://127.0.0.1:40080` to
+`http://host.docker.internal:40080`, so it can still reach a proxy on the Mac.
 | `TURNSTILE_PROXY`       | unset   | Proxy URL for Turnstile browser             |
 | `TURNSTILE_GEOIP`       | unset   | `1` = align browser timezone/locale/WebGL to the proxy exit IP (shared by Turnstile + cloudflare + awswaf) |
+| `TURNSTILE_CONCURRENCY` | `2`     | Default simultaneous Turnstile browser attempts; Grok requests override it dynamically, including one reserved OAuth slot during immediate upload |
 | `RECAPTCHA_HEADLESS`    | `0`     | `1` = run reCAPTCHA headless                |
 | `RECAPTCHA_PROXY`       | unset   | Proxy URL for reCAPTCHA browser             |
 | `RECAPTCHA_GEOIP`       | unset   | `1` = same geo alignment for the reCAPTCHA browser |

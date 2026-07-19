@@ -99,6 +99,7 @@ export type GrokRegisterConfig = {
   request_timeout: number
   captcha_timeout: number
   captcha_poll_interval: number
+  local_concurrency: number
   create_path: string
   result_path: string
   max_mail_retries: number
