@@ -141,10 +141,12 @@ export function grokSyncStateText(item: GrokAccount): string {
   return '状态未知'
 }
 
-type GrokOAuthDisplayStatus = 'unauthorized' | 'normal' | 'limited' | 'expired' | 'invalid'
+type GrokOAuthDisplayStatus = 'unauthorized' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid'
 
 function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
   if (!item.oauth) return 'unauthorized'
+  const probeCode = cleanString(item.oauth.probe?.code).toLowerCase()
+  if (probeCode === 'personal-team-blocked' || probeCode.startsWith('personal-team-blocked:')) return 'no_quota'
   const status = cleanString(item.oauth.status).toLowerCase()
   if (status === 'expired') return 'expired'
   if (status === 'disabled' || status === 'invalid') return 'invalid'
@@ -160,6 +162,7 @@ export function grokOAuthStatusText(item: GrokAccount): string {
     unauthorized: 'OAuth 未授权',
     normal: 'OAuth 正常',
     limited: 'OAuth 限流',
+    no_quota: '无额度/无订阅',
     expired: 'OAuth 过期',
     invalid: 'OAuth 失效',
   } as const)[grokOAuthDisplayStatus(item)]
@@ -170,6 +173,7 @@ export function grokOAuthShortStatusText(item: GrokAccount): string {
     unauthorized: '未授权',
     normal: '正常',
     limited: '限流',
+    no_quota: '无额度/无订阅',
     expired: '过期',
     invalid: '失效',
   } as const)[grokOAuthDisplayStatus(item)]
@@ -178,7 +182,7 @@ export function grokOAuthShortStatusText(item: GrokAccount): string {
 export function grokOAuthStatusClass(item: GrokAccount): string {
   const status = grokOAuthDisplayStatus(item)
   if (status === 'normal') return PILL_TONE_CLASS.success
-  if (status === 'limited') return PILL_TONE_CLASS.warning
+  if (status === 'limited' || status === 'no_quota') return PILL_TONE_CLASS.warning
   if (status === 'expired' || status === 'invalid') return PILL_TONE_CLASS.danger
   return PILL_TONE_CLASS.neutral
 }

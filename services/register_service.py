@@ -234,12 +234,15 @@ def _runtime_status_bucket(value: object) -> str:
 def _grok_oauth_display_status(value: object) -> str:
     if not isinstance(value, dict) or not value:
         return "unauthorized"
+    probe = value.get("probe") if isinstance(value.get("probe"), dict) else {}
+    probe_code = _clean_text(probe.get("code")).lower()
+    if probe_code == "personal-team-blocked" or probe_code.startswith("personal-team-blocked:"):
+        return "no_quota"
     status = _clean_text(value.get("status")).lower()
     if status == "expired":
         return "expired"
     if status in {"disabled", "invalid"}:
         return "invalid"
-    probe = value.get("probe") if isinstance(value.get("probe"), dict) else {}
     probe_status = _clean_text(probe.get("status")).lower()
     if probe_status == "valid":
         return "normal"
@@ -1436,7 +1439,7 @@ class RegisterService:
             return _clean_text(item.get("probe_status")).lower() == "unknown"
         if status_filter.startswith("oauth_"):
             oauth_status = status_filter.removeprefix("oauth_")
-            if oauth_status in {"unauthorized", "normal", "limited", "expired", "invalid"}:
+            if oauth_status in {"unauthorized", "normal", "limited", "no_quota", "expired", "invalid"}:
                 return _grok_oauth_display_status(item.get("oauth")) == oauth_status
         runtime_aliases = {
             "normal": "active",
@@ -1557,7 +1560,7 @@ class RegisterService:
             "oauth_linked": sum(1 for item in merged_items if isinstance(item.get("oauth"), dict)),
             "oauth_status": {
                 status: sum(1 for value in oauth_display_statuses if value == status)
-                for status in ("unauthorized", "normal", "limited", "expired", "invalid")
+                for status in ("unauthorized", "normal", "limited", "no_quota", "expired", "invalid")
             },
             "runtime_status": runtime_status,
             "calls_total": calls_total,

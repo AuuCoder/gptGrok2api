@@ -79,6 +79,11 @@ def _clean_text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _is_personal_team_blocked(code: object) -> bool:
+    normalized = _clean_text(code).lower()
+    return normalized == "personal-team-blocked" or normalized.startswith("personal-team-blocked:")
+
+
 def _expires_at_epoch(value: object) -> int:
     text = _clean_text(value)
     if not text:
@@ -1098,7 +1103,7 @@ class XaiCliOAuthService:
             elif response.status_code == 429:
                 status = "limited"
             elif response.status_code in {401, 403} or (
-                response.status_code == 402 and code == "personal-team-blocked"
+                response.status_code == 402 and _is_personal_team_blocked(code)
             ):
                 status = "invalid"
             else:
@@ -1244,7 +1249,7 @@ class XaiCliOAuthService:
     def _mark_response_failure(self, account: dict[str, Any], response: httpx.Response) -> None:
         code, _error = _response_error_fields(response)
         if response.status_code in {401, 403} or (
-            response.status_code == 402 and code == "personal-team-blocked"
+            response.status_code == 402 and _is_personal_team_blocked(code)
         ):
             self.store.set_status([_clean_text(account.get("id"))], "invalid")
 

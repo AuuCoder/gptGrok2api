@@ -2859,6 +2859,8 @@ def _safe_cpa_sync_error(error: Exception, account: dict) -> str:
 
 def _sub2api_sync_account_payload(registrar: Any, account: dict, index: int, target_label: str = "Sub2API") -> dict:
     """Build a durable OAuth payload while retaining the local web account."""
+    if target_label == "Sub2API" and str(account.get("access_token") or "").strip():
+        return dict(account)
     if str(account.get("refresh_token") or "").strip():
         return dict(account)
     extractor = getattr(registrar, "extract_platform_oauth_credentials", None)

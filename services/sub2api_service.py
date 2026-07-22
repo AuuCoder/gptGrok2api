@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
+import os
+from urllib.parse import parse_qs, urlparse
 import threading
 import time
 import uuid
@@ -12,6 +15,8 @@ from pathlib import Path
 from threading import Lock
 
 from curl_cffi.requests import Session
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from services.account_service import account_service
 from services.config import DATA_DIR, config
@@ -31,6 +36,8 @@ DEFAULT_SUB2API_SYNC_CONFIG = {
     "group_id": "",
     "group_name": "",
 }
+
+OPENAI_AGENT_REGISTER_URL = "https://auth.openai.com/api/accounts/v1/agent/register"
 
 # Cached JWT per server to avoid re-login on every list/import call.
 # Token lifetime on sub2api defaults to 24h; we refresh 5 min before expiry.
@@ -778,13 +785,12 @@ def _resolve_sync_group(server: dict, sync_config: dict, *, platform: str = "ope
 def _openai_sync_credentials(account: dict) -> dict[str, str]:
     access_token = _clean(account.get("access_token") or account.get("accessToken"))
     refresh_token = _clean(account.get("refresh_token") or account.get("refreshToken"))
-    if not access_token or not refresh_token:
-        raise Sub2APISyncError("本地账号缺少 OAuth 凭据，无法同步")
+    if not access_token:
+        raise Sub2APISyncError("本地账号缺少 Access Token，无法同步")
 
-    credentials = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-    }
+    credentials = {"access_token": access_token}
+    if refresh_token:
+        credentials["refresh_token"] = refresh_token
     for source_key, target_key in (
         ("id_token", "id_token"),
         ("idToken", "id_token"),
@@ -839,6 +845,118 @@ def _sync_idempotency_key(server: dict, account: dict) -> str:
     source = f"{_clean(server.get('id'))}:{stable_value}:{token_fingerprint}"
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return f"chatgpt2api-sub2api-{digest}"
+
+
+def _build_openai_agent_identity(account: dict) -> dict[str, Any]:
+    access_token = _clean(account.get("access_token") or account.get("accessToken"))
+    if not access_token:
+        raise Sub2APISyncError("本地账号缺少 Access Token，无法创建 Agent Identity")
+    try:
+        payload_segment = access_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
+    except Exception as exc:
+        raise Sub2APISyncError("本地账号 Access Token 不是有效 JWT") from exc
+
+    auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else {}
+    profile_claims = claims.get("https://api.openai.com/profile") if isinstance(claims, dict) else {}
+    auth_claims = auth_claims if isinstance(auth_claims, dict) else {}
+    profile_claims = profile_claims if isinstance(profile_claims, dict) else {}
+    account_id = _clean(
+        account.get("account_id")
+        or account.get("chatgpt_account_id")
+        or auth_claims.get("chatgpt_account_id")
+        or claims.get("sub")
+    )
+    user_id = _clean(
+        account.get("user_id")
+        or account.get("chatgpt_user_id")
+        or auth_claims.get("chatgpt_user_id")
+        or auth_claims.get("user_id")
+        or claims.get("sub")
+    )
+    if not account_id or not user_id:
+        raise Sub2APISyncError("本地账号 JWT 缺少 ChatGPT 账号标识")
+
+    private_key = Ed25519PrivateKey.generate()
+    private_key_b64 = base64.b64encode(private_key.private_bytes(
+        encoding=Encoding.DER,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )).decode()
+    public_bytes = private_key.public_key().public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)
+    ssh_header = b"ssh-ed25519"
+    public_blob = (
+        len(ssh_header).to_bytes(4, "big") + ssh_header
+        + len(public_bytes).to_bytes(4, "big") + public_bytes
+    )
+
+    request_headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    request_payload = {
+        "abom": {
+            "agent_version": "0.138.0-alpha.6",
+            "agent_harness_id": "codex-cli",
+            "running_location": "local",
+        },
+        "agent_public_key": f"ssh-ed25519 {base64.b64encode(public_blob).decode()}",
+    }
+    session = Session(impersonate="chrome")
+    try:
+        response = session.post(
+            OPENAI_AGENT_REGISTER_URL,
+            headers=request_headers,
+            json=request_payload,
+            timeout=20,
+        )
+        response_text = _clean(response.text).lower()
+        cloudflare_blocked = response.status_code == 403 and (
+            "just a moment" in response_text or "challenges.cloudflare.com" in response_text
+        )
+        if cloudflare_blocked:
+            session.close()
+            fallback_proxy = _clean(os.getenv("CHATGPT2API_HOST_PRIVOXY_URL")) or "http://127.0.0.1:40080"
+            session = Session(impersonate="chrome", proxy=fallback_proxy)
+            response = session.post(
+                OPENAI_AGENT_REGISTER_URL,
+                headers=request_headers,
+                json=request_payload,
+                timeout=30,
+            )
+        error_url = urlparse(str(getattr(response, "url", "") or ""))
+        if error_url.path == "/error":
+            encoded_error = _clean(parse_qs(error_url.query).get("payload", [""])[0])
+            try:
+                decoded_error = json.loads(base64.urlsafe_b64decode(encoded_error + "=" * (-len(encoded_error) % 4)))
+            except Exception:
+                decoded_error = {}
+            error_code = _clean(decoded_error.get("errorCode")) if isinstance(decoded_error, dict) else ""
+            if error_code == "unsupported_agent_delegator":
+                raise Sub2APISyncError("当前 OpenAI Token 不支持 Agent Identity（unsupported_agent_delegator）")
+            if error_code:
+                raise Sub2APISyncError(f"OpenAI Agent Identity 注册失败（{error_code}）")
+        if not response.ok:
+            raise Sub2APISyncError(f"OpenAI Agent Identity 注册失败（HTTP {response.status_code}）")
+        agent_runtime_id = _clean(response.json().get("agent_runtime_id"))
+    except Sub2APISyncError:
+        raise
+    except Exception as exc:
+        raise Sub2APISyncError("OpenAI Agent Identity 注册请求失败") from exc
+    finally:
+        session.close()
+    if not agent_runtime_id:
+        raise Sub2APISyncError("OpenAI 未返回 Agent Runtime ID")
+
+    return {
+        "auth_mode": "agentIdentity",
+        "agent_identity": {
+            "agent_runtime_id": agent_runtime_id,
+            "agent_private_key": private_key_b64,
+            "account_id": account_id,
+            "chatgpt_user_id": user_id,
+            "email": _clean(account.get("email") or profile_claims.get("email")),
+            "plan_type": _clean(account.get("plan_type") or auth_claims.get("chatgpt_plan_type")) or "free",
+            "chatgpt_account_is_fedramp": False,
+        },
+    }
 
 
 def _xai_sync_credentials(account: dict) -> dict[str, str]:
@@ -936,14 +1054,29 @@ def sync_openai_account(server: dict, account: dict, sync_config: object) -> dic
             "Idempotency-Key": _sync_idempotency_key(server, account),
         }
         session = _server_session(server)
-        payload = build_openai_oauth_export_account(account)
-        payload["extra"]["import_source"] = "chatgpt2api_registration"
-        payload["group_ids"] = [group_id]
+        try:
+            agent_identity_content = json.dumps(_build_openai_agent_identity(account), separators=(",", ":"))
+        except Sub2APISyncError as exc:
+            if "unsupported_agent_delegator" not in str(exc):
+                raise
+            agent_identity_content = _clean(account.get("access_token") or account.get("accessToken"))
+        payload = {
+            "content": agent_identity_content,
+            "name": _clean(account.get("email")) or None,
+            "notes": None,
+            "proxy_id": None,
+            "concurrency": 1,
+            "priority": 0,
+            "rate_multiplier": 1,
+            "group_ids": [group_id],
+            "auto_pause_on_expired": True,
+            "update_existing": True,
+        }
         response = session.post(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts",
+            f"{base_url.rstrip('/')}/api/v1/admin/accounts/import/codex-session",
             headers=headers,
             json=payload,
-            timeout=30,
+            timeout=120,
         )
         if not response.ok:
             raise Sub2APISyncError(f"Sub2API 同步账号失败（HTTP {response.status_code}）")

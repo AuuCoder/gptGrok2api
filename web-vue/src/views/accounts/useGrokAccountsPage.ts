@@ -44,6 +44,7 @@ export const grokAccountStatusFilterOptions = [
   { label: 'OAuth 未授权', value: 'oauth_unauthorized' },
   { label: 'OAuth 正常', value: 'oauth_normal' },
   { label: 'OAuth 限流', value: 'oauth_limited' },
+  { label: '无额度/无订阅', value: 'oauth_no_quota' },
   { label: 'OAuth 过期', value: 'oauth_expired' },
   { label: 'OAuth 失效', value: 'oauth_invalid' },
 ] as const satisfies ReadonlyArray<{ label: string; value: GrokAccountStatusFilter }>

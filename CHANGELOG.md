@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.9 - 2026-07-22
+
++ [新增] GPT 对接 Sub2API 支持 Codex Agent Identity 新模式；兼容新版 JWT claims、Cloudflare WARP 重试，并在上游不支持 Agent Identity 时自动降级为 Codex Session 导入。
++ [新增] Grok OAuth 新增无额度监测，正确识别 `personal-team-blocked:spending-limit`，账号页独立显示“无额度/无订阅”，支持筛选、汇总并保留原始 402 错误详情；同时优化内置运行时操作超时处理。
+
 ## 1.0.8 - 2026-07-21
 
 + [新增] OpenAI 与 Grok 账号导出统一支持 CPA ZIP 和 Sub2API JSON，可分别导出选中账号或全部账号，并保留对应 OAuth/SSO 元数据。

@@ -560,7 +560,12 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         account = self._account()
         upstream = httpx.Response(
             402,
-            json={"error": {"code": "personal-team-blocked", "message": "Personal team is blocked"}},
+            json={
+                "error": {
+                    "code": "personal-team-blocked:spending-limit",
+                    "message": "Personal team has no credits",
+                }
+            },
         )
 
         with patch.object(self.service, "_post_response", new=AsyncMock(return_value=upstream)):
@@ -570,7 +575,7 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         saved = self.store.get(str(account["id"]), redacted=True)
         self.assertEqual(saved["status"], "invalid")
         self.assertEqual(saved["probe"]["http_status"], 402)
-        self.assertEqual(saved["probe"]["code"], "personal-team-blocked")
+        self.assertEqual(saved["probe"]["code"], "personal-team-blocked:spending-limit")
 
     async def test_sync_models_delivers_account_after_delayed_probe_becomes_valid(self) -> None:
         account = self._account()

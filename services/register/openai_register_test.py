@@ -1315,7 +1315,7 @@ class RegistrationCheckoutWorkerTest(unittest.TestCase):
         self.assertEqual(result["result"]["sub2api_sync_status"], "success")
         registrar.close.assert_called_once()
 
-    def test_sub2api_sync_extracts_durable_oauth_credentials_without_replacing_web_account(self) -> None:
+    def test_sub2api_agent_identity_sync_keeps_web_access_token_without_refresh(self) -> None:
         registrar = MagicMock()
         registrar.extract_platform_oauth_credentials.return_value = {
             "access_token": "platform-access",
@@ -1330,10 +1330,9 @@ class RegistrationCheckoutWorkerTest(unittest.TestCase):
 
         payload = openai_register._sub2api_sync_account_payload(registrar, web_account, 1)
 
-        registrar.extract_platform_oauth_credentials.assert_called_once_with("new@example.test", 1)
-        self.assertEqual(payload["access_token"], "platform-access")
-        self.assertEqual(payload["refresh_token"], "platform-refresh")
-        self.assertEqual(payload["id_token"], "platform-id")
+        registrar.extract_platform_oauth_credentials.assert_not_called()
+        self.assertEqual(payload["access_token"], "chatgpt-web-access")
+        self.assertNotIn("refresh_token", payload)
         self.assertEqual(web_account["access_token"], "chatgpt-web-access")
         self.assertNotIn("refresh_token", web_account)
 

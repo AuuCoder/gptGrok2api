@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -230,6 +231,35 @@ class EmbeddedGrokRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["summary"], {"total": 2, "ok": 2, "fail": 0})
         self.assertEqual(refresh.await_args.kwargs["concurrency"], 15)
+
+    async def test_account_add_does_not_wait_for_full_host_archive_sync(self) -> None:
+        runtime = EmbeddedGrokRuntime()
+        response = JSONResponse({"status": "success", "count": 1, "skipped": 0})
+        sync_started = asyncio.Event()
+        release_sync = asyncio.Event()
+
+        async def slow_sync():
+            sync_started.set()
+            await release_sync.wait()
+            return {"added": 1, "updated": 0, "missing": 0, "count": 1}
+
+        with patch.object(runtime, "_state", return_value=(object(), object())), patch(
+            "app.products.web.admin.tokens.add_tokens",
+            new=AsyncMock(return_value=response),
+        ), patch.object(runtime, "sync_host_accounts_from_runtime", new=slow_sync):
+            result = await runtime.add_accounts(
+                ["new-token"],
+                pool="auto",
+                tags=["registered"],
+                auto_nsfw=False,
+            )
+            self.assertEqual(result["count"], 1)
+            await asyncio.wait_for(sync_started.wait(), timeout=1)
+            self.assertIsNotNone(runtime._host_sync_task)
+            release_sync.set()
+            await runtime._host_sync_task
+
+        self.assertIsNone(runtime._host_sync_task)
 
     async def test_chat_test_uses_explicit_token_without_tools_and_records_synced_account(self) -> None:
         token = "explicit-sso-token"

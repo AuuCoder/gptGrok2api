@@ -1268,6 +1268,7 @@ const grokMetricItems = computed(() => {
   const oauthMetrics = [
     { key: 'oauth-normal', label: 'OAuth 正常', value: optionalMetricNumber(oauthStatus.normal), valueClass: 'text-emerald-600' },
     { key: 'oauth-limited', label: 'OAuth 限流', value: optionalMetricNumber(oauthStatus.limited), valueClass: 'text-amber-600' },
+    { key: 'oauth-no-quota', label: '无额度/无订阅', value: optionalMetricNumber(oauthStatus.no_quota), valueClass: 'text-amber-600' },
     { key: 'oauth-expired', label: 'OAuth 过期', value: optionalMetricNumber(oauthStatus.expired), valueClass: 'text-rose-600' },
     { key: 'oauth-invalid', label: 'OAuth 失效', value: optionalMetricNumber(oauthStatus.invalid), valueClass: 'text-rose-600' },
     { key: 'oauth-unauthorized', label: 'OAuth 未授权', value: optionalMetricNumber(oauthStatus.unauthorized), valueClass: 'text-muted-foreground' },

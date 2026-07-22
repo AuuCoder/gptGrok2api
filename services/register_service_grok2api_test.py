@@ -479,6 +479,9 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             store.upsert(
                 {"email": "no-oauth@example.com", "password": "password", "sso": "other-sso-secret", "status": "active"}
             )
+            blocked = store.upsert(
+                {"email": "blocked@example.com", "password": "password", "sso": "blocked-sso-secret", "status": "active"}
+            )
             oauth_store = XaiCliOAuthAccountStore(Path(temp_dir) / "xai_cli_oauth_accounts.json")
             linked = oauth_store.upsert(
                 {
@@ -497,6 +500,19 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                     "status": "disabled",
                 }
             )
+            oauth_store.upsert(
+                {
+                    "email": "blocked@example.com",
+                    "refresh_token": "blocked-refresh-secret",
+                    "status": "invalid",
+                    "probe": {
+                        "status": "invalid",
+                        "http_status": 402,
+                        "code": "personal-team-blocked:spending-limit",
+                        "error": "spending limit reached",
+                    },
+                }
+            )
             service = self._service(temp_dir, grok2api_enabled=False)
 
             with patch.object(register_service_module, "grok_account_store", store), patch.object(
@@ -505,23 +521,25 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                 view = service.grok_accounts_view()
                 unauthorized_view = service.grok_accounts_view(status="oauth_unauthorized")
                 normal_view = service.grok_accounts_view(status="oauth_normal")
+                no_quota_view = service.grok_accounts_view(status="oauth_no_quota")
                 invalid_view = service.grok_accounts_view(status="oauth_invalid")
 
             item = next(entry for entry in view["items"] if entry["id"] == saved["item"]["id"])
             self.assertEqual(item["oauth"]["id"], linked["item"]["id"])
             self.assertEqual(item["oauth"]["status"], "active")
             self.assertEqual(item["oauth"]["models"], ["grok-4.5"])
-            self.assertEqual(view["summary"]["oauth_total"], 2)
-            self.assertEqual(view["summary"]["oauth_linked"], 1)
+            self.assertEqual(view["summary"]["oauth_total"], 3)
+            self.assertEqual(view["summary"]["oauth_linked"], 2)
             self.assertEqual(
                 view["summary"]["oauth_status"],
-                {"unauthorized": 1, "normal": 1, "limited": 0, "expired": 0, "invalid": 0},
+                {"unauthorized": 1, "normal": 1, "limited": 0, "no_quota": 1, "expired": 0, "invalid": 0},
             )
             self.assertEqual(
                 [entry["email"] for entry in unauthorized_view["items"]],
                 ["no***h@example.com"],
             )
             self.assertEqual([entry["id"] for entry in normal_view["items"]], [saved["item"]["id"]])
+            self.assertEqual([entry["id"] for entry in no_quota_view["items"]], [blocked["item"]["id"]])
             self.assertEqual(invalid_view["items"], [])
             encoded = json.dumps(view, ensure_ascii=False)
             self.assertNotIn("oauth-access-secret", encoded)

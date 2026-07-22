@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -17,14 +19,42 @@ class _Response:
         return self._payload
 
 
+class OpenAIAgentIdentityTest(unittest.TestCase):
+    def test_new_jwt_claims_fall_back_to_auth_user_id_and_subject(self) -> None:
+        claims = {
+            "sub": "auth0|account-subject",
+            "https://api.openai.com/auth": {"user_id": "user-new"},
+            "https://api.openai.com/profile": {"email": "new@example.test"},
+        }
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        account = {"access_token": f"header.{payload}.signature"}
+        session = MagicMock()
+        session.post.return_value = _Response(200, {"agent_runtime_id": "agent-new"})
+
+        with patch("services.sub2api_service.Session", return_value=session):
+            auth = sub2api_service._build_openai_agent_identity(account)
+
+        identity = auth["agent_identity"]
+        self.assertEqual(auth["auth_mode"], "agentIdentity")
+        self.assertEqual(identity["account_id"], "auth0|account-subject")
+        self.assertEqual(identity["chatgpt_user_id"], "user-new")
+
+
 class Sub2APIAccountSyncTest(unittest.TestCase):
     def setUp(self) -> None:
         # Authentication is cached per saved server.  Keep the TLS assertions
         # isolated so an earlier login cannot bypass the mocked Session.
         with sub2api_service._token_cache_lock:
             sub2api_service._token_cache.clear()
+        self.agent_identity_patcher = patch.object(
+            sub2api_service,
+            "_build_openai_agent_identity",
+            return_value={"auth_mode": "agentIdentity", "agent_identity": {"agent_runtime_id": "agent-one"}},
+        )
+        self.agent_identity = self.agent_identity_patcher.start()
 
     def tearDown(self) -> None:
+        self.agent_identity_patcher.stop()
         with sub2api_service._token_cache_lock:
             sub2api_service._token_cache.clear()
 
@@ -87,14 +117,39 @@ class Sub2APIAccountSyncTest(unittest.TestCase):
             for call in session.post.call_args_list
         ))
 
-        account_call = self._post_call_for(session, "/api/v1/admin/accounts")
+        account_call = self._post_call_for(session, "/api/v1/admin/accounts/import/codex-session")
         self.assertEqual(account_call.kwargs["headers"]["x-api-key"], "remote-api-key")
         payload = account_call.kwargs["json"]
-        self.assertEqual(payload["platform"], "openai")
-        self.assertEqual(payload["type"], "oauth")
         self.assertEqual(payload["group_ids"], [42])
+        self.assertEqual(json.loads(payload["content"])["auth_mode"], "agentIdentity")
+
+    def test_agent_identity_sync_accepts_access_token_without_refresh_token(self) -> None:
+        account = self._account()
+        account.pop("refresh_token")
+
+        payload = sub2api_service.build_openai_oauth_export_account(account)
+
+        self.assertEqual(payload["type"], "oauth")
         self.assertEqual(payload["credentials"]["access_token"], "access-token-must-not-leak")
-        self.assertEqual(payload["credentials"]["refresh_token"], "refresh-token-must-not-leak")
+        self.assertNotIn("refresh_token", payload["credentials"])
+
+    def test_sync_falls_back_to_codex_session_for_unsupported_agent_delegator(self) -> None:
+        session = MagicMock()
+        session.post.return_value = _Response(201, {"data": {"created": 1, "updated": 0}})
+        sync_config = sub2api_service.normalize_sync_config({
+            "enabled": True,
+            "server_id": "remote-server",
+            "group_id": "42",
+        })
+
+        self.agent_identity.side_effect = sub2api_service.Sub2APISyncError(
+            "当前 OpenAI Token 不支持 Agent Identity（unsupported_agent_delegator）"
+        )
+        with patch("services.sub2api_service.Session", return_value=session):
+            sub2api_service.sync_openai_account(self._server(), self._account(), sync_config)
+
+        account_call = self._post_call_for(session, "/api/v1/admin/accounts/import/codex-session")
+        self.assertEqual(account_call.kwargs["json"]["content"], "access-token-must-not-leak")
 
     def test_sync_creates_custom_group_then_uses_its_id(self) -> None:
         session = MagicMock()
@@ -120,7 +175,7 @@ class Sub2APIAccountSyncTest(unittest.TestCase):
 
         group_call = self._post_call_for(session, "/api/v1/admin/groups")
         self.assertEqual(group_call.kwargs["json"]["name"], "Fresh accounts")
-        account_call = self._post_call_for(session, "/api/v1/admin/accounts")
+        account_call = self._post_call_for(session, "/api/v1/admin/accounts/import/codex-session")
         self.assertEqual(account_call.kwargs["json"]["group_ids"], [13])
 
     def test_sync_failure_raises_sanitized_error(self) -> None:
@@ -269,7 +324,10 @@ class Sub2APITLSVerificationTest(unittest.TestCase):
                 session = MagicMock()
                 session.post.return_value = _Response(201, {"data": {"id": "remote-account"}})
 
-                with patch("services.sub2api_service.Session", return_value=session) as session_factory:
+                with patch(
+                    "services.sub2api_service._build_openai_agent_identity",
+                    return_value={"auth_mode": "agentIdentity", "agent_identity": {"agent_runtime_id": "agent-one"}},
+                ), patch("services.sub2api_service.Session", return_value=session) as session_factory:
                     result = sub2api_service.sync_openai_account(server, self._account(), sync_config)
 
                 self.assertTrue(result["ok"])

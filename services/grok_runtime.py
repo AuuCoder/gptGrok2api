@@ -43,6 +43,7 @@ class EmbeddedGrokRuntime:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._host_app: FastAPI | None = None
         self._ready = threading.Event()
+        self._host_sync_task: asyncio.Task[None] | None = None
 
     @property
     def available(self) -> bool:
@@ -71,6 +72,13 @@ class EmbeddedGrokRuntime:
                 yield
             finally:
                 self._ready.clear()
+                if self._host_sync_task is not None:
+                    self._host_sync_task.cancel()
+                    try:
+                        await self._host_sync_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._host_sync_task = None
         self._host_app = None
         self._loop = None
 
@@ -143,6 +151,20 @@ class EmbeddedGrokRuntime:
         tokens = payload.get("tokens") if isinstance(payload, dict) else []
         runtime_items = [dict(item) for item in tokens if isinstance(item, dict)] if isinstance(tokens, list) else []
         return await asyncio.to_thread(grok_account_store.reconcile_runtime_accounts, runtime_items)
+
+    def schedule_host_accounts_sync(self, *, delay: float = 0.5) -> None:
+        """Coalesce expensive full-pool archive syncs outside import requests."""
+        if self._host_sync_task is not None and not self._host_sync_task.done():
+            return
+
+        async def run() -> None:
+            try:
+                await asyncio.sleep(max(0.0, delay))
+                await self.sync_host_accounts_from_runtime()
+            finally:
+                self._host_sync_task = None
+
+        self._host_sync_task = asyncio.create_task(run())
 
     async def list_accounts(self) -> dict[str, Any]:
         from app.products.web.admin.tokens import list_tokens
@@ -347,7 +369,7 @@ class EmbeddedGrokRuntime:
             refresh_svc=refresh_service,
         )
         payload = _response_payload(response)
-        await self.sync_host_accounts_from_runtime()
+        self.schedule_host_accounts_sync()
         return payload
 
     async def refresh_accounts(self, tokens: list[str]) -> dict[str, Any]:
