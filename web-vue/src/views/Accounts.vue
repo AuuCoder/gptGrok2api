@@ -274,6 +274,21 @@
           <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-refresh" :bordered="false" gap="tight">
             <Button
               size="sm"
+              :variant="grokProbePollingEnabled ? 'outline' : 'primary'"
+              :root-class="accountToolbarButtonClass"
+              :disabled="grokProbePollingBusy"
+              :title="grokProbePollingEnabled ? '关闭 Grok 定时轮询' : '开启 Grok 定时轮询'"
+              @click="toggleGrokProbePolling"
+            >
+              <Icon
+                :icon="grokProbePollingBusy ? 'lucide:loader-circle' : grokProbePollingEnabled ? 'lucide:circle-pause' : 'lucide:circle-play'"
+                class="h-3.5 w-3.5"
+                :class="{ 'animate-spin': grokProbePollingBusy }"
+              />
+              {{ grokProbePollingBusy ? '更新中...' : grokProbePollingEnabled ? '关闭轮询' : '开启轮询' }}
+            </Button>
+            <Button
+              size="sm"
               variant="outline"
               :root-class="accountToolbarSecondaryClass"
               :disabled="grokLoading"
@@ -1121,6 +1136,9 @@ const {
   summary: grokSummary,
   runtimeAvailable: grokRuntimeAvailable,
   runtimeError: grokRuntimeError,
+  probePollingEnabled: grokProbePollingEnabled,
+  probePollingBusy: grokProbePollingBusy,
+  toggleProbePolling: toggleGrokProbePolling,
   accountListTotal: grokAccountListTotal,
   accountAllTotal: grokAccountAllTotal,
   currentPage: grokCurrentPage,

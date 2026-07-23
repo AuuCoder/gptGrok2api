@@ -6,7 +6,7 @@ import { useToast } from '@/composables/useToast'
 import { saveBlob } from '@/lib/downloads'
 
 type AccountExportScope = 'selected' | 'all' | 'auto'
-export type AccountExportFormat = 'cpa' | 'sub2api'
+export type AccountExportFormat = 'cpa' | 'sub2api' | 'agent_identity'
 
 type AccountExportRuntimeOptions = {
   accounts: Ref<Account[]>
@@ -16,7 +16,7 @@ type AccountExportRuntimeOptions = {
   setError: (prefix: string, error: unknown, notify?: boolean) => void
 }
 
-function createExportFilename(format: AccountExportFormat) {
+function createExportFilename(format: AccountExportFormat, count = 0) {
   const now = new Date()
   const parts = [
     now.getFullYear(),
@@ -27,9 +27,11 @@ function createExportFilename(format: AccountExportFormat) {
     String(now.getMinutes()).padStart(2, '0'),
     String(now.getSeconds()).padStart(2, '0'),
   ]
-  return format === 'cpa'
-    ? `codex-accounts-cpa-${parts.join('')}.zip`
-    : `openai-accounts-sub2api-${parts.join('')}.json`
+  if (format === 'cpa') return `codex-accounts-cpa-${parts.join('')}.zip`
+  if (format === 'agent_identity') {
+    return count === 1 ? 'auth.json' : `openai-agent-identities-${parts.join('')}.zip`
+  }
+  return `openai-accounts-sub2api-${parts.join('')}.json`
 }
 
 export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
@@ -38,7 +40,9 @@ export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
   const confirmDialog = useConfirmDialog()
 
   async function exportAccounts(scope: AccountExportScope = 'auto', format: AccountExportFormat = 'sub2api') {
-    const formatLabel = format === 'cpa' ? 'CPA ZIP' : 'Sub2API JSON'
+    const formatLabel = format === 'cpa'
+      ? 'CPA ZIP'
+      : format === 'agent_identity' ? 'Agent Identity' : 'Sub2API JSON'
     const targetIds = new Set(scope === 'all' ? [] : options.selectedIds.value)
     if (scope === 'all' || (scope === 'auto' && targetIds.size === 0)) {
       const totalHint = options.accountAllTotal.value || options.accountListTotal.value || options.accounts.value.length
@@ -57,7 +61,7 @@ export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
       exportBusy.value = true
       try {
         const blob = await accountsApi.exportAccounts([], format)
-        saveBlob(blob, createExportFilename(format))
+        saveBlob(blob, createExportFilename(format, totalHint))
         toast.success(`已导出全部账号为 ${formatLabel}`)
       } catch (error) {
         options.setError('导出失败', error)
@@ -92,7 +96,7 @@ export function useAccountExportRuntime(options: AccountExportRuntimeOptions) {
     exportBusy.value = true
     try {
       const blob = await accountsApi.exportAccounts(targetAccounts.map((item) => item.id), format)
-      saveBlob(blob, createExportFilename(format))
+      saveBlob(blob, createExportFilename(format, targetAccounts.length))
       toast.success(`已导出 ${targetAccounts.length} 个账号为 ${formatLabel}`)
     } catch (error) {
       options.setError('导出失败', error)

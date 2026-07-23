@@ -158,13 +158,22 @@ class Grok2APIAccountClient:
             raise Grok2APIAccountError("Grok2API returned a non-object response")
         return payload
 
-    def list(self) -> dict[str, Any]:
+    def list(self, *, cancel_event: Any | None = None) -> dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise Grok2APIAccountError("Grok 账号列表读取已取消")
         if self.embedded:
             self._require_ready()
             from services.grok_runtime import grok_runtime
 
-            return grok_runtime.run_sync(grok_runtime.list_accounts, timeout=self.timeout)
-        return self._request("GET", "/tokens")
+            return grok_runtime.run_sync(
+                grok_runtime.list_accounts,
+                timeout=self.timeout,
+                cancel_event=cancel_event,
+            )
+        result = self._request("GET", "/tokens")
+        if cancel_event is not None and cancel_event.is_set():
+            raise Grok2APIAccountError("Grok 账号列表读取已取消")
+        return result
 
     def add(
         self,
@@ -220,9 +229,16 @@ class Grok2APIAccountClient:
             json_body={"tokens": normalized},
         )
 
-    def verify(self, tokens: list[str]) -> dict[str, Any]:
+    def verify(
+        self,
+        tokens: list[str],
+        *,
+        cancel_event: Any | None = None,
+    ) -> dict[str, Any]:
         """Probe each token once through the read-only fast quota endpoint."""
         normalized = _normalized_tokens(tokens)
+        if cancel_event is not None and cancel_event.is_set():
+            raise Grok2APIAccountError("Grok 账号验证已取消")
         if self.embedded:
             self._require_ready()
             from services.grok_runtime import grok_runtime
@@ -235,12 +251,16 @@ class Grok2APIAccountClient:
             return grok_runtime.run_sync(
                 lambda: grok_runtime.verify_accounts(normalized),
                 timeout=timeout,
+                cancel_event=cancel_event,
             )
-        return self._request(
+        result = self._request(
             "POST",
             "/tokens/verify",
             json_body={"tokens": normalized},
         )
+        if cancel_event is not None and cancel_event.is_set():
+            raise Grok2APIAccountError("Grok 账号验证已取消")
+        return result
 
     def chat_test(
         self,

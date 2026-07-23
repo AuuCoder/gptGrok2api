@@ -25,6 +25,19 @@ class ProtobufTest(unittest.TestCase):
         self.assertEqual(fields[3], [b"castle-token"])
         self.assertNotIn(2, fields)
 
+    def test_create_email_request_omits_empty_castle_field(self) -> None:
+        payload = grok_protocol.create_email_validation_request("user@example.com", "")
+
+        self.assertEqual(grok_protocol.parse_protobuf_fields(payload), {1: [b"user@example.com"]})
+
+    def test_validate_password_uses_captured_descriptor_fields(self) -> None:
+        payload = grok_protocol.validate_password_request("user@example.com", "Secret123!")
+
+        self.assertEqual(
+            grok_protocol.parse_protobuf_fields(payload),
+            {4: [b"user@example.com"], 5: [b"Secret123!"]},
+        )
+
     def test_verify_email_request_only_uses_descriptor_fields(self) -> None:
         payload = grok_protocol.verify_email_validation_request("user@example.com", "ABC-123")
         fields = grok_protocol.parse_protobuf_fields(payload)
@@ -266,6 +279,84 @@ class FlightTest(unittest.TestCase):
         follow.assert_called_once_with(redirect_url, base_url=signup_url)
         self.assertEqual(result["sso"], "sso-token")
         self.assertEqual(result["redirect_url"], grok_protocol.summarize_sensitive_url(redirect_url))
+
+    def test_xconsole_creation_matches_reference_payload(self) -> None:
+        signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
+        redirect_url = "https://grok.com/auth/callback?exchange=session-token"
+        client = grok_protocol.GrokProtocolClient({"signup_flow": "xconsole"})
+        self.addCleanup(client.close)
+        client.metadata = grok_protocol.SignupMetadata(
+            signup_url=signup_url,
+            action_id="a" * 42,
+            sitekey="0x-test",
+            castle_pk="pk-test",
+            router_state_tree=[],
+            castle_sdk_url="https://accounts.x.ai/castle.js",
+            castle_sdk_path="/tmp/castle.js",
+        )
+        response = MagicMock(
+            status_code=200,
+            text="",
+            content=b"",
+            url=signup_url,
+            headers={"x-action-redirect": redirect_url + ";replace"},
+        )
+        exchange = grok_protocol.SessionExchangeResult(
+            redirect_url,
+            redirect_url,
+            200,
+            1,
+            "sso_cookie",
+            sso="sso-token",
+        )
+
+        with (
+            patch.object(client, "_prewarm_grok_session") as prewarm,
+            patch.object(client, "create_castle_token") as create_castle,
+            patch.object(client, "_server_action_request", return_value=response) as submit,
+            patch.object(client, "_follow_signup_result", return_value=exchange),
+        ):
+            result = client.create_user_and_session(
+                email="user@example.com",
+                code="ABC-123",
+                given_name="Test",
+                family_name="User",
+                password="Secret123!",
+                turnstile_token="turnstile-token",
+            )
+
+        payload = submit.call_args.args[0]
+        self.assertEqual(payload["createUserAndSessionRequest"]["tosAcceptedVersion"], "$undefined")
+        self.assertEqual(payload["castleRequestToken"], "")
+        self.assertTrue(payload["conversionId"])
+        prewarm.assert_not_called()
+        create_castle.assert_not_called()
+        self.assertEqual(result["sso"], "sso-token")
+
+    def test_xconsole_email_and_password_rpcs_match_reference_sequence(self) -> None:
+        client = grok_protocol.GrokProtocolClient({"signup_flow": "xconsole"})
+        self.addCleanup(client.close)
+        grpc_result = grok_protocol.GrpcWebResult((), {}, 0, "")
+
+        with (
+            patch.object(client, "create_castle_token") as create_castle,
+            patch.object(client, "_grpc_post", return_value=grpc_result) as grpc_post,
+        ):
+            client.send_email_validation_code("user@example.com")
+            client.validate_password("user@example.com", "Secret123!")
+
+        create_castle.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in grpc_post.call_args_list],
+            [
+                "/auth_mgmt.AuthManagement/CreateEmailValidationCode",
+                "/auth_mgmt.AuthManagement/ValidatePassword",
+            ],
+        )
+        self.assertEqual(
+            grok_protocol.parse_protobuf_fields(grpc_post.call_args_list[0].args[1]),
+            {1: [b"user@example.com"]},
+        )
 
     def test_reports_business_error_from_non_2xx_flight_response(self) -> None:
         signup_url = "https://accounts.x.ai/sign-up?redirect=grok-com"
@@ -813,6 +904,7 @@ class GrokWorkerTest(unittest.TestCase):
         self.assertNotIn("relay@icloud.example", "\n".join(log_messages))
         call_names = [call[0] for call in client.method_calls]
         self.assertLess(call_names.index("verify_email_validation_code"), call_names.index("solve_turnstile"))
+        self.assertLess(call_names.index("validate_password"), call_names.index("solve_turnstile"))
         mark_result.assert_called_once_with(create_mailbox.return_value, success=True)
 
     @patch.object(grok_register, "GrokProtocolClient")

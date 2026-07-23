@@ -46,9 +46,20 @@ class TurnstileWaitTest(unittest.IsolatedAsyncioTestCase):
 
     def test_concurrency_limit_is_clamped(self):
         self.assertEqual(solve._concurrency_limit(None), solve._TURNSTILE_CONCURRENCY)
-        self.assertEqual(solve._concurrency_limit(0), 1)
+        self.assertEqual(solve._concurrency_limit(0), 0)
         self.assertEqual(solve._concurrency_limit(7), 7)
-        self.assertEqual(solve._concurrency_limit(99), 16)
+        self.assertEqual(solve._concurrency_limit(99), 64)
+
+    async def test_zero_concurrency_bypasses_shared_slot_limit(self):
+        solve._active_solves = 100
+
+        limit, queue_wait, acquired = await solve._acquire_solve_slot(0, 0)
+
+        self.assertTrue(acquired)
+        self.assertEqual(limit, 0)
+        self.assertEqual(queue_wait, 0.0)
+        self.assertEqual(solve._active_solves, 101)
+        await solve._release_solve_slot()
 
     def test_injected_widget_requests_visible_normal_mode(self):
         self.assertIn("size: 'normal'", solve._WIDGET_INJECT_JS)

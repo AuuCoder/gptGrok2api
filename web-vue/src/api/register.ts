@@ -101,6 +101,7 @@ export type GrokOAuthDeliveryConfig = {
 }
 
 export type GrokRegisterConfig = {
+  signup_flow: 'xconsole' | 'legacy' | string
   provider: GrokTurnstileProvider | string
   api_key: string
   api_base: string
@@ -192,6 +193,9 @@ export type LegacyRegisterConfig = {
   checkout: OpenAICheckoutConfig
   sub2api_sync: OpenAISub2APISyncConfig
   cpa_sync: OpenAICPASyncConfig
+  agent_identity_archive: {
+    enabled: boolean
+  }
   mail: {
     request_timeout?: number
     wait_timeout?: number

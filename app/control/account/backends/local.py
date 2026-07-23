@@ -4,7 +4,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,10 @@ class LocalAccountRepository:
     def __init__(self, db_path: Path) -> None:
         self._path = Path(db_path)
         self._lock = asyncio.Lock()
-        self._connect_lock = threading.Lock()
+        # Python's bundled SQLite can deadlock inside WAL open/close when many
+        # worker threads churn short-lived connections concurrently.  Keep the
+        # complete connection lifecycle serial for this repository instance.
+        self._connect_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -59,9 +62,15 @@ class LocalAccountRepository:
             conn.execute("PRAGMA foreign_keys=ON")
             return conn
 
+    @contextmanager
+    def _connection(self):
+        with self._connect_lock:
+            with closing(self._connect()) as conn:
+                yield conn
+
     def _init_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
+        with self._connection() as conn:
             conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS {_META} (
                     key   TEXT PRIMARY KEY,
@@ -406,13 +415,13 @@ class LocalAccountRepository:
 
     async def get_revision(self) -> int:
         def _sync() -> int:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 return self._get_revision_sync(conn)
         return await asyncio.to_thread(_sync)
 
     async def runtime_snapshot(self) -> RuntimeSnapshot:
         def _sync() -> RuntimeSnapshot:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev = self._get_revision_sync(conn)
                 rows = conn.execute(
                     f"SELECT * FROM {_TBL} WHERE deleted_at IS NULL"
@@ -430,7 +439,7 @@ class LocalAccountRepository:
         limit: int = 5000,
     ) -> AccountChangeSet:
         def _sync() -> AccountChangeSet:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev = self._get_revision_sync(conn)
                 rows = conn.execute(
                     f"SELECT * FROM {_TBL} WHERE revision > ? ORDER BY revision LIMIT ?",
@@ -465,7 +474,7 @@ class LocalAccountRepository:
             return AccountMutationResult()
 
         def _sync() -> AccountMutationResult:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev   = self._bump_revision(conn)
                 count = self._upsert_sync(conn, items, rev)
                 conn.commit()
@@ -482,7 +491,7 @@ class LocalAccountRepository:
             return AccountMutationResult()
 
         def _sync() -> AccountMutationResult:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev   = self._bump_revision(conn)
                 count = self._patch_sync(conn, patches, rev)
                 conn.commit()
@@ -500,7 +509,7 @@ class LocalAccountRepository:
 
         def _sync() -> AccountMutationResult:
             ts = now_ms()
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev = self._bump_revision(conn)
                 conn.executemany(
                     f"UPDATE {_TBL} SET deleted_at = ?, updated_at = ?, revision = ? "
@@ -522,7 +531,7 @@ class LocalAccountRepository:
             return []
 
         def _sync() -> list[AccountRecord]:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 placeholders = ",".join("?" * len(tokens))
                 rows = conn.execute(
                     f"SELECT * FROM {_TBL} WHERE token IN ({placeholders})",
@@ -537,7 +546,7 @@ class LocalAccountRepository:
         query: ListAccountsQuery,
     ) -> AccountPage:
         def _sync() -> AccountPage:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 where_parts: list[str] = []
                 params: list[Any] = []
 
@@ -627,7 +636,7 @@ class LocalAccountRepository:
         """Return the compact payload needed by the admin account list."""
 
         def _sync() -> list[dict[str, Any]]:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 cursor = conn.execute(self._token_payload_select_sql())
                 return [self._row_to_token_payload(r) for r in cursor]
 
@@ -635,7 +644,7 @@ class LocalAccountRepository:
 
     async def list_invalid_tokens(self) -> list[str]:
         def _sync() -> list[str]:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rows = conn.execute(
                     f"""
                     SELECT token
@@ -665,7 +674,7 @@ class LocalAccountRepository:
         def _sync() -> int:
             total = 0
             limit = max(1, int(batch_size))
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 while True:
                     rows = conn.execute(
                         f"""
@@ -702,7 +711,7 @@ class LocalAccountRepository:
     ) -> AccountMutationResult:
         def _sync() -> AccountMutationResult:
             ts = now_ms()
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 rev = self._bump_revision(conn)
                 # Soft-delete all existing accounts in the pool.
                 conn.execute(
@@ -731,7 +740,7 @@ class LocalAccountRepository:
            （来源：人工 patch、迁移数据、M1 历史副作用等）
         """
         def _sync() -> int:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 now = now_ms()
                 # 先查有多少需要重置的
                 count = conn.execute(
@@ -809,7 +818,7 @@ class LocalAccountRepository:
         - ext.expired_at <= now - 1 hour
         """
         def _sync() -> int:
-            with closing(self._connect()) as conn:
+            with self._connection() as conn:
                 now = now_ms()
                 recovery_threshold = now - 3600 * 1000
 

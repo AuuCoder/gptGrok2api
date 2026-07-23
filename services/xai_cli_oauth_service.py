@@ -61,6 +61,7 @@ _PROTOCOL_RETRY_STAGES = frozenset(
         "castle",
         "consent",
         "device_code",
+        "pkce",
         "response",
         "session",
         "signin",
@@ -82,6 +83,16 @@ def _clean_text(value: object) -> str:
 def _is_personal_team_blocked(code: object) -> bool:
     normalized = _clean_text(code).lower()
     return normalized == "personal-team-blocked" or normalized.startswith("personal-team-blocked:")
+
+
+def _is_permission_pending_probe(probe: object) -> bool:
+    if not isinstance(probe, dict):
+        return False
+    code = _clean_text(probe.get("code"))
+    return code == "permission-denied" or (
+        _clean_text(probe.get("http_status")) == "402"
+        and _is_personal_team_blocked(code)
+    )
 
 
 def _expires_at_epoch(value: object) -> int:
@@ -424,14 +435,20 @@ class XaiCliOAuthService:
                 for item in candidates
                 if _clean_text(item.get("id"))
                 and _clean_text(item.get("email"))
-                and _clean_text(item.get("password"))
+                and (
+                    _clean_text(item.get("sso") or item.get("sso_token"))
+                    or _clean_text(item.get("password"))
+                )
             ),
             None,
         )
         if account is None:
             if requested_id:
-                raise ValidationError("Selected Grok account is missing or has no saved login password", param="account_id")
-            raise ValidationError("No unlinked Grok account with a saved login password is available")
+                raise ValidationError(
+                    "Selected Grok account is missing or has no saved SSO/login password",
+                    param="account_id",
+                )
+            raise ValidationError("No unlinked Grok account with a saved SSO/login password is available")
         return account
 
     def _prepare_protocol_authorization(
@@ -624,23 +641,42 @@ class XaiCliOAuthService:
         notify_failure: bool = True,
     ) -> None:
         from services.register_service import register_service
-        from services.xai_device_oauth_protocol import XaiDeviceOAuthProtocol
         from services.xai_oauth_delivery_service import deliver_xai_oauth_account
 
-        self._update_protocol_job(job_id, status="running", stage="bootstrap", message="发现当前 Castle SDK 和登录参数")
         runtime = register_service.get()
         grok_config = self._oauth_grok_config(runtime)
         proxy = self._resolve_registration_proxy(runtime.get("proxy"))
+        oauth_flow = _clean_text(grok_config.get("xai_cli_oauth_flow")).lower() or "device"
+        if oauth_flow == "pkce_reference":
+            from services.xai_reference_pkce_protocol import XaiReferencePkceProtocol
+
+            protocol = XaiReferencePkceProtocol(
+                _clean_text(grok_config.get("xai_cli_pkce_reference_dir")),
+                proxy=proxy,
+                timeout=max(60, int(grok_config.get("captcha_timeout") or 180) + 60),
+            )
+            initial_stage = "pkce"
+            initial_message = "准备 Authorization Code + PKCE 参考授权"
+            source_type = "registered_account_pkce_reference"
+        else:
+            from services.xai_device_oauth_protocol import XaiDeviceOAuthProtocol
+
+            protocol = XaiDeviceOAuthProtocol(grok_config, proxy=proxy)
+            initial_stage = "device_code"
+            initial_message = "准备 Device Code 协议授权"
+            source_type = "registered_account_protocol"
+        self._update_protocol_job(job_id, status="running", stage=initial_stage, message=initial_message)
 
         def progress(stage: str, message: str) -> None:
             self._update_protocol_job(job_id, status="running", stage=stage, message=message)
 
         try:
-            protocol = XaiDeviceOAuthProtocol(grok_config, proxy=proxy, progress=progress)
+            protocol.progress = progress
             credential = await asyncio.to_thread(
                 protocol.authorize,
                 email=_clean_text(source.get("email")),
                 password=_clean_text(source.get("password")),
+                sso=_clean_text(source.get("sso") or source.get("sso_token")),
             )
             self._update_protocol_job(job_id, stage="models", message="验证 OAuth 凭据并探测模型")
             imported = await self.import_credentials(
@@ -649,12 +685,12 @@ class XaiCliOAuthService:
                 id_token=_clean_text(credential.get("id_token")),
                 email=_clean_text(source.get("email")),
                 expires_in=int(credential.get("expires_in") or 21_600),
-                source_type="registered_account_protocol",
+                source_type=source_type,
                 proxy="" if proxy == "direct" else proxy,
             )
             account_id = _clean_text((imported.get("account") or {}).get("id"))
             probe = imported.get("probe") if isinstance(imported.get("probe"), dict) else {}
-            if _clean_text(probe.get("code")) == "permission-denied":
+            if _is_permission_pending_probe(probe):
                 self._update_protocol_job(
                     job_id,
                     status="authorized",
@@ -818,7 +854,7 @@ class XaiCliOAuthService:
             }
         )
         probe = await self.probe_account(_clean_text(account["item"].get("id")))
-        if probe.get("status") == "invalid" and _clean_text(probe.get("code")) != "permission-denied":
+        if probe.get("status") == "invalid" and not _is_permission_pending_probe(probe):
             raise UpstreamError(
                 "xAI CLI OAuth account cannot call grok-4.5",
                 status=int(probe.get("http_status") or 403),

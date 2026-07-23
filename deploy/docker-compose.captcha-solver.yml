@@ -11,8 +11,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      TURNSTILE_HEADLESS: "0"
-      TURNSTILE_CONCURRENCY: "2"
+      TURNSTILE_HEADLESS: "1"
+      TURNSTILE_CONCURRENCY: "0"
       SOLVER_ALLOW_PRIVATE: "1"
       SOLVER_LOOPBACK_PROXY_HOST: "host.docker.internal"
     volumes:

@@ -1028,7 +1028,7 @@ class RegisterServiceGrokTest(unittest.TestCase):
         self.assertEqual(local["grok"]["local_max_attempts"], 3)
 
         clamped = _normalize({"target": "grok", "grok": {"provider": "local", "local_concurrency": 99}})
-        self.assertEqual(clamped["grok"]["local_concurrency"], 16)
+        self.assertEqual(clamped["grok"]["local_concurrency"], 64)
 
         no_queue = _normalize({"target": "grok", "grok": {"local_queue_timeout": 0}})
         self.assertEqual(no_queue["grok"]["local_queue_timeout"], 0)
@@ -1307,6 +1307,9 @@ class RegisterServiceGrokTest(unittest.TestCase):
                 protocol_calls.append(("verify", (email, code)))
                 return "verification-token"
 
+            def validate_password(self, email, password):
+                protocol_calls.append(("validate_password", (email, password)))
+
             def solve_turnstile(self):
                 return "turnstile-token"
 
@@ -1371,7 +1374,10 @@ class RegisterServiceGrokTest(unittest.TestCase):
             runtime_mail = create_mailbox.call_args.args[0]
             self.assertEqual(runtime_mail["providers"][0]["project"], "grok")
             self.assertEqual(runtime_mail["providers"][0]["keyword"], "xAI")
-            self.assertEqual([name for name, _value in protocol_calls], ["send", "verify", "create"])
+            self.assertEqual(
+                [name for name, _value in protocol_calls],
+                ["send", "verify", "validate_password", "create"],
+            )
             self.assertEqual(protocol_calls[1][1], ("wrapper@example.com", "ABC-123"))
 
 

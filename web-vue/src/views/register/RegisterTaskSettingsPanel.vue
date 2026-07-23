@@ -322,6 +322,20 @@
       <div v-show="sub2apiExpanded" id="register-sub2api-settings" class="register-form-grid">
         <label class="register-toggle register-field--full">
           <Checkbox
+            :model-value="config.agent_identity_archive.enabled"
+            :disabled="config.enabled"
+            @update:model-value="config.agent_identity_archive.enabled = Boolean($event)"
+          />
+          <span>
+            <strong>归档 Agent Identity</strong>
+            <small>注册成功后在本地加密保存独立身份，可从账号页单独导出 auth.json。</small>
+          </span>
+        </label>
+
+        <div class="register-field--full border-t border-border pt-4"></div>
+
+        <label class="register-toggle register-field--full">
+          <Checkbox
             :model-value="config.sub2api_sync.enabled"
             :disabled="config.enabled"
             @update:model-value="updateSub2APIEnabled"
@@ -446,6 +460,17 @@
     <FormSection v-if="config.target === 'grok'" title="Grok 注册协议" density="roomy">
       <div class="register-form-grid register-form-grid--grok">
         <label class="register-field">
+          <span class="register-label">注册链路</span>
+          <GroupedSelectMenu
+            v-model="config.grok.signup_flow"
+            :groups="grokSignupFlowGroups"
+            selected-indicator="none"
+            :disabled="config.enabled"
+            block
+          />
+        </label>
+
+        <label class="register-field">
           <span class="register-label">Turnstile 服务</span>
           <GroupedSelectMenu
             v-model="config.grok.provider"
@@ -495,8 +520,8 @@
           <Input
             v-model.number="config.grok.local_concurrency"
             type="number"
-            min="1"
-            max="16"
+            min="0"
+            max="64"
             step="1"
             block
             :disabled="config.enabled"
@@ -846,6 +871,7 @@ import type { CPAPool, Sub2APIRemoteGroup, Sub2APIServer } from '@/api/accountIm
 import { proxyApi, type ProxySampleTestResult } from '@/api/proxy'
 import type { LegacyRegisterConfig } from '@/api/register'
 import {
+  grokSignupFlowGroups,
   registerModeGroups,
   registerProxyModeGroups,
   registerTargetOptions,

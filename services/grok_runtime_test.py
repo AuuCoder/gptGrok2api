@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 from fastapi.responses import JSONResponse
@@ -98,6 +100,45 @@ class _ChatRefreshService:
 
 
 class EmbeddedGrokRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_run_sync_cancels_inflight_future_when_stop_is_requested(self) -> None:
+        runtime = EmbeddedGrokRuntime()
+        runtime._ready.set()
+        runtime._loop = MagicMock()
+        runtime._host_app = MagicMock()
+        cancel_event = threading.Event()
+        result_started = threading.Event()
+        future = MagicMock()
+
+        def wait_for_result(*, timeout: float):
+            result_started.set()
+            threading.Event().wait(timeout)
+            raise FutureTimeoutError()
+
+        future.result.side_effect = wait_for_result
+
+        async def operation() -> None:
+            await asyncio.Future()
+
+        def schedule(coroutine, _loop):
+            coroutine.close()
+            return future
+
+        with patch("services.grok_runtime.asyncio.run_coroutine_threadsafe", side_effect=schedule):
+            running = asyncio.create_task(
+                asyncio.to_thread(
+                    runtime.run_sync,
+                    operation,
+                    timeout=5,
+                    cancel_event=cancel_event,
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(result_started.wait, 1))
+            cancel_event.set()
+            with self.assertRaisesRegex(RuntimeError, "已取消"):
+                await asyncio.wait_for(running, timeout=1)
+
+        future.cancel.assert_called_once_with()
+
     async def test_basic_pool_catalog_only_exposes_supported_models(self) -> None:
         runtime = EmbeddedGrokRuntime()
         with patch.object(runtime, "_state", return_value=(_Repository(), object())):

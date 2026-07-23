@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -95,6 +97,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
         self.assertEqual(
             defaults["probe_scheduler"],
             {
+                "enabled": False,
                 "interval_minutes": 60,
                 "batch_size": 50,
                 "last_started_at": "",
@@ -208,7 +211,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                 [((queued["id"],), {"prioritize": True}), ((reused["id"],), {"prioritize": True})],
             )
 
-    def test_grok_oauth_log_masks_email(self) -> None:
+    def test_grok_oauth_log_shows_full_email(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._service(temp_dir)
 
@@ -221,10 +224,9 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             )
 
             text = service.get()["grok_oauth_logs"][-1]["text"]
-            self.assertIn("co***s@example.com", text)
-            self.assertNotIn("complete-address@example.com", text)
+            self.assertIn("complete-address@example.com", text)
 
-    def test_grok_probe_scheduler_runs_in_background_even_with_legacy_disabled_setting(self) -> None:
+    def test_grok_probe_scheduler_respects_disabled_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._service(
                 temp_dir,
@@ -233,11 +235,144 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
 
             status = service.grok_probe_scheduler_status()
 
-            self.assertNotIn("enabled", status)
+            self.assertFalse(status["enabled"])
             self.assertNotIn("queued", status)
             self.assertEqual(status["interval_minutes"], 15)
             self.assertEqual(status["batch_size"], 25)
-            self.assertTrue(status["next_run_at"])
+            self.assertEqual(status["next_run_at"], "")
+
+    def test_grok_probe_scheduler_toggle_persists_and_wakes_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_file = Path(temp_dir) / "register.json"
+            service = RegisterService(store_file)
+
+            enabled = service.set_grok_probe_scheduler_enabled(True)
+            first_run_cancel = service._grok_probe_cancel_event
+
+            self.assertTrue(enabled["enabled"])
+            self.assertTrue(enabled["next_run_at"])
+            self.assertTrue(service._grok_probe_wake_event.is_set())
+            restored = RegisterService(store_file).grok_probe_scheduler_status()
+            self.assertTrue(restored["enabled"])
+
+            disabled = service.set_grok_probe_scheduler_enabled(False)
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual(disabled["next_run_at"], "")
+            self.assertTrue(first_run_cancel.is_set())
+
+            service.set_grok_probe_scheduler_enabled(True)
+            self.assertIsNot(service._grok_probe_cancel_event, first_run_cancel)
+            self.assertFalse(service._grok_probe_cancel_event.is_set())
+
+    def test_enabling_grok_probe_scheduler_wakes_and_runs_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir, probe_scheduler={"enabled": False})
+            stop_event = threading.Event()
+            probe_started = threading.Event()
+
+            def run_probe(_stop_event: object) -> dict[str, int]:
+                probe_started.set()
+                stop_event.set()
+                return {}
+
+            with patch.object(
+                service,
+                "_grok_oauth_recovery_sweep_due",
+                return_value=False,
+            ), patch.object(
+                service,
+                "_grok_oauth_has_inflight_recovery",
+                return_value=False,
+            ), patch.object(
+                service,
+                "_grok_oauth_has_unlinked_accounts",
+                return_value=False,
+            ), patch.object(
+                service,
+                "_run_grok_permission_retry_once",
+                return_value={"tested": 0},
+            ), patch.object(service, "_run_grok_probe_once", side_effect=run_probe):
+                thread = service.start_grok_probe_scheduler(stop_event)
+                service.set_grok_probe_scheduler_enabled(True)
+                self.assertTrue(probe_started.wait(0.5))
+                thread.join(timeout=1)
+
+            self.assertFalse(thread.is_alive())
+
+    def test_disabling_grok_probe_scheduler_cancels_active_oauth_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            oauth_store = XaiCliOAuthAccountStore(Path(temp_dir) / "oauth_accounts.json")
+            oauth_store.upsert(
+                {
+                    "email": "oauth@example.com",
+                    "subject": "oauth-subject",
+                    "access_token": "oauth-access",
+                    "refresh_token": "oauth-refresh",
+                    "expires_in": 3600,
+                    "models": ["grok-4.5"],
+                }
+            )
+            grok_store = GrokAccountStore(Path(temp_dir) / "grok_accounts.json")
+            service = self._service(temp_dir, probe_scheduler={"enabled": True})
+            client = FakeGrok2APIClient()
+            probe_started = threading.Event()
+            probe_cancelled = threading.Event()
+
+            async def blocking_probe(_oauth_service, _ids, *, concurrency=10):
+                del concurrency
+                probe_started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    probe_cancelled.set()
+
+            result: list[dict[str, int]] = []
+            worker = threading.Thread(
+                target=lambda: result.append(
+                    service._run_grok_probe_once(service._grok_probe_cancel_event)
+                )
+            )
+            with patch.object(register_service_module, "grok_account_store", grok_store), patch.object(
+                register_service_module, "xai_cli_oauth_store", oauth_store
+            ), patch.object(service, "_grok2api_client", return_value=client), patch(
+                "services.xai_cli_oauth_service.XaiCliOAuthService.probe_accounts",
+                new=blocking_probe,
+            ):
+                worker.start()
+                self.assertTrue(probe_started.wait(1))
+                started_at = time.monotonic()
+                status = service.set_grok_probe_scheduler_enabled(False)
+                worker.join(timeout=1)
+                elapsed = time.monotonic() - started_at
+
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(probe_cancelled.is_set())
+            self.assertLess(elapsed, 1.0)
+            self.assertFalse(status["enabled"])
+            self.assertFalse(status["running"])
+            self.assertEqual(status["last_error"], "")
+            self.assertIn("Grok 账号探测已停止", status["events"][-1]["message"])
+
+    def test_disabled_grok_probe_scheduler_does_not_run_automatic_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = self._service(temp_dir, probe_scheduler={"enabled": False})
+            stop_event = threading.Event()
+
+            def stop_after_wait(_timeout: float) -> None:
+                stop_event.set()
+
+            with patch.object(service, "_run_grok_permission_retry_once") as permission_retry, patch.object(
+                service, "_run_grok_probe_once"
+            ) as probe_once, patch.object(
+                service, "_run_grok_oauth_recovery_sweep"
+            ) as recovery_sweep, patch.object(
+                service._grok_probe_wake_event, "wait", side_effect=stop_after_wait
+            ):
+                service._run_grok_probe_scheduler(stop_event)
+
+            permission_retry.assert_not_called()
+            probe_once.assert_not_called()
+            recovery_sweep.assert_not_called()
 
     def test_chat_test_resolves_one_id_and_redacts_console_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -345,7 +480,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             client.refresh.assert_called_with(["raw-sso-token"])
             self.assertTrue(any("Grok 账号已保存并加入账号池" in item["text"] for item in service.get()["logs"]))
 
-    def test_auto_import_refresh_failure_does_not_change_local_active_result(self) -> None:
+    def test_auto_import_refresh_failure_is_logged_as_pending_after_add(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = GrokAccountStore(Path(temp_dir) / "grok_accounts.json")
             service = self._service(temp_dir)
@@ -362,8 +497,31 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             account = store.list_accounts(redacted=False)[0]
             self.assertEqual(account["status"], "active")
             logs = service.get()["logs"]
-            self.assertTrue(any(item["level"] == "red" and "导入内置 Grok 账号池失败" in item["text"] for item in logs))
+            self.assertTrue(any(item["level"] == "yellow" and "验证待复检" in item["text"] for item in logs))
+            self.assertTrue(any("已保存并加入账号池" in item["text"] for item in logs))
+            self.assertFalse(any("导入内置 Grok 账号池失败" in item["text"] for item in logs))
             self.assertNotIn("secret-token", json.dumps(logs, ensure_ascii=False))
+
+    def test_sync_keeps_added_account_when_refresh_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = GrokAccountStore(Path(temp_dir) / "grok_accounts.json")
+            saved = store.upsert(
+                {"email": "active@example.com", "password": "password", "sso": "secret-token", "status": "active"}
+            )
+            service = self._service(temp_dir)
+            client = FakeGrok2APIClient()
+            client.refresh.side_effect = RuntimeError("upstream 503 secret-token")
+
+            with patch.object(register_service_module, "grok_account_store", store), patch.object(
+                service, "_grok2api_client", return_value=client
+            ):
+                result = service.sync_grok_accounts([saved["item"]["id"]])
+
+            self.assertEqual(result["summary"], {"total": 1, "ok": 1, "fail": 0})
+            synced = result["results"][0]
+            self.assertEqual(synced["sync_state"], "synced")
+            self.assertTrue(synced["verification_pending"])
+            self.assertNotIn("secret-token", json.dumps(result, ensure_ascii=False))
 
     def test_sync_can_skip_refresh_when_verify_on_import_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -724,7 +882,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             )
             service = self._service(
                 temp_dir,
-                probe_scheduler={"interval_minutes": 15, "batch_size": 1},
+                probe_scheduler={"enabled": True, "interval_minutes": 15, "batch_size": 1},
             )
             client = FakeGrok2APIClient()
             client.list_result = {
@@ -977,7 +1135,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
 
     def test_scheduler_drains_due_permission_batches_without_idle_wait(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            service = self._service(temp_dir)
+            service = self._service(temp_dir, probe_scheduler={"enabled": True})
             stop_event = threading.Event()
             calls = 0
 
@@ -1052,8 +1210,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                 successful = oauth_store.get(oauth["id"], redacted=True)
                 success_log = service.get()["grok_oauth_logs"][-1]["text"]
                 self.assertIn("自动恢复完成，已上传到 NovaApi", success_log)
-                self.assertIn("re***r@example.com", success_log)
-                self.assertNotIn("recover@example.com", success_log)
+                self.assertIn("recover@example.com", success_log)
                 self.assertEqual(service.get()["logs"], [])
 
                 oauth_store.update_recovery_state(
@@ -1097,8 +1254,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
 
             pending_log = service.get()["grok_oauth_logs"][-1]["text"]
             self.assertIn("权限待生效，已进入延迟复检", pending_log)
-            self.assertIn("pe***g@example.com", pending_log)
-            self.assertNotIn("pending@example.com", pending_log)
+            self.assertIn("pending@example.com", pending_log)
             self.assertEqual(service.get()["logs"], [])
 
     def test_startup_recovery_sweep_queues_unlinked_oauth_accounts(self) -> None:
@@ -1300,7 +1456,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                     "status": "active",
                 }
             )["item"]
-            service = self._service(temp_dir)
+            service = self._service(temp_dir, probe_scheduler={"enabled": True})
             probe = service._config["grok"]["probe_scheduler"]
             probe["last_finished_at"] = "2020-01-01T00:00:00+00:00"
             probe["oauth_recovery_last_sweep_at"] = "2020-01-01T00:00:00+00:00"

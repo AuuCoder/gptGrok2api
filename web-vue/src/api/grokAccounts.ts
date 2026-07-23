@@ -64,6 +64,16 @@ export type GrokAccountsSummary = {
   probe?: Partial<Record<GrokAccountVerificationStatus, number>>
 }
 
+export type GrokProbeSchedulerStatus = {
+  enabled: boolean
+  running?: boolean
+  next_run_at?: string
+  interval_minutes?: number
+  last_started_at?: string
+  last_finished_at?: string
+  last_error?: string
+}
+
 export type GrokAccount = {
   id: string
   platform: 'grok'
@@ -116,6 +126,11 @@ export type GrokAccountsListResponse = {
   summary?: GrokAccountsSummary
   runtime_available?: boolean
   runtime_error?: string
+  probe_scheduler?: GrokProbeSchedulerStatus
+}
+
+export type GrokProbePollingResponse = {
+  probe_scheduler: GrokProbeSchedulerStatus
 }
 
 export type GrokAccountsDeleteResponse = {
@@ -262,6 +277,13 @@ export const grokAccountsApi = {
   refreshSnapshot() {
     return apiClient.post<never, GrokRuntimeSnapshotResponse>(
       `${GROK_ACCOUNTS_PATH}/runtime/snapshot`,
+    )
+  },
+
+  setProbePolling(enabled: boolean) {
+    return apiClient.post<{ enabled: boolean }, GrokProbePollingResponse>(
+      '/api/register/grok/probe-polling',
+      { enabled },
     )
   },
 

@@ -12,7 +12,7 @@ import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from services.account_service import account_service
@@ -36,6 +36,7 @@ REGISTER_FILE = DATA_DIR / "register.json"
 REGISTER_TARGETS = {"openai", "grok"}
 CHECKOUT_CHANNELS = {"upi", "pix"}
 DEFAULT_GROK_PROBE_CONFIG = {
+    "enabled": False,
     "interval_minutes": 60,
     "batch_size": 50,
     "last_started_at": "",
@@ -46,6 +47,7 @@ DEFAULT_GROK_PROBE_CONFIG = {
     "events": [],
 }
 DEFAULT_GROK_CONFIG = {
+    "signup_flow": "xconsole",
     "max_mail_retries": 3,
     "provider": "yescaptcha",
     "api_key": "",
@@ -69,6 +71,8 @@ DEFAULT_GROK_CONFIG = {
     "result_path": "/getTaskResult",
     "custom_headers": {},
     "xai_cli_oauth_enabled": True,
+    "xai_cli_oauth_flow": "device",
+    "xai_cli_pkce_reference_dir": "",
     "oauth_delivery": DEFAULT_XAI_OAUTH_DELIVERY_CONFIG,
     "grok2api_enabled": True,
     "grok2api_api_base": "",
@@ -94,6 +98,42 @@ _GROK_PENDING_STATUSES = {
     "submission_unconfirmed",
 }
 _GROK_FAILED_STATUSES = {"submission_failed"}
+
+
+class _GrokProbeCancelled(RuntimeError):
+    pass
+
+
+class _GrokProbeStopSignal:
+    def __init__(self, *events: threading.Event | None):
+        self._events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+
+def _raise_if_grok_probe_cancelled(stop_event: Any | None) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise _GrokProbeCancelled()
+
+
+async def _await_grok_probe_with_cancel(
+    awaitable: Awaitable[Any],
+    stop_event: Any | None,
+) -> Any:
+    task = asyncio.create_task(awaitable)
+    try:
+        while not task.done():
+            _raise_if_grok_probe_cancelled(stop_event)
+            await asyncio.wait({task}, timeout=0.1)
+        return await task
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
 class GrokAccountChatTestError(RuntimeError):
     """A safe, operator-facing failure from one explicit Grok chat test."""
 
@@ -302,6 +342,7 @@ def _normalize_grok_probe_config(value: object) -> dict[str, Any]:
             }
         )
     return {
+        "enabled": _safe_bool(source.get("enabled"), False),
         "interval_minutes": max(5, min(10_080, _safe_int(source.get("interval_minutes"), 60) or 60)),
         "batch_size": max(1, min(500, _safe_int(source.get("batch_size"), 50) or 50)),
         "last_started_at": _clean_text(source.get("last_started_at")),
@@ -511,6 +552,11 @@ def _normalize(raw: dict) -> dict:
     }
     cfg["sub2api_sync"] = normalize_sync_config(cfg.get("sub2api_sync"))
     cfg["cpa_sync"] = normalize_cpa_delivery_config(cfg.get("cpa_sync"))
+    archive_source = cfg.get("agent_identity_archive")
+    archive_source = archive_source if isinstance(archive_source, dict) else {}
+    cfg["agent_identity_archive"] = {
+        "enabled": _safe_bool(archive_source.get("enabled"), True),
+    }
     grok_source = cfg.get("grok") if isinstance(cfg.get("grok"), dict) else {}
     grok = {**DEFAULT_GROK_CONFIG, **grok_source}
     nested_bridge = grok_source.get("grok2api") if isinstance(grok_source.get("grok2api"), dict) else {}
@@ -539,6 +585,8 @@ def _normalize(raw: dict) -> dict:
         if grok_provider in {"yescaptcha", "2captcha", "local", "custom"}
         else "yescaptcha"
     )
+    signup_flow = str(grok.get("signup_flow") or "xconsole").strip().lower()
+    grok["signup_flow"] = signup_flow if signup_flow in {"legacy", "xconsole"} else "xconsole"
     for key in (
         "api_key",
         "api_base",
@@ -559,6 +607,9 @@ def _normalize(raw: dict) -> dict:
     grok2api_pool = grok["grok2api_pool"].lower() or "auto"
     grok["grok2api_pool"] = grok2api_pool if grok2api_pool in {"auto", "basic", "super", "heavy"} else "auto"
     grok["xai_cli_oauth_enabled"] = _safe_bool(grok.get("xai_cli_oauth_enabled"), True)
+    oauth_flow = str(grok.get("xai_cli_oauth_flow") or "device").strip().lower()
+    grok["xai_cli_oauth_flow"] = oauth_flow if oauth_flow in {"device", "pkce_reference"} else "device"
+    grok["xai_cli_pkce_reference_dir"] = str(grok.get("xai_cli_pkce_reference_dir") or "").strip()
     grok["oauth_delivery"] = normalize_xai_oauth_delivery_config(grok_source.get("oauth_delivery"))
     grok["grok2api_enabled"] = True
     grok["grok2api_api_base"] = ""
@@ -570,7 +621,7 @@ def _normalize(raw: dict) -> dict:
         ("request_timeout", 1, 300),
         ("captcha_timeout", 10, 900),
         ("captcha_poll_interval", 1, 60),
-        ("local_concurrency", 1, 16),
+        ("local_concurrency", 0, 64),
         ("local_attempt_timeout", 15, 120),
         ("local_queue_timeout", 0, 300),
         ("local_max_attempts", 1, 5),
@@ -610,6 +661,9 @@ class RegisterService:
         self._grok_probe_running = False
         self._grok_probe_scheduler_thread: threading.Thread | None = None
         self._grok_probe_wake_event = threading.Event()
+        self._grok_probe_cancel_event = threading.Event()
+        self._grok_probe_idle_event = threading.Event()
+        self._grok_probe_idle_event.set()
         self._grok_runtime_snapshot_lock = threading.Lock()
         self._grok_runtime_snapshot_error = ""
         self._logs: list[dict] = []
@@ -667,7 +721,10 @@ class RegisterService:
             backend.register_checkout_retry_sink = self._enqueue_checkout_retry
         if runtime["target"] == "grok" and hasattr(backend, "account_result_sink"):
             backend.account_result_sink = self._persist_grok_account_snapshot
-        config_keys = ["mail", "proxy", "total", "threads", "checkout", "sub2api_sync", "cpa_sync"]
+        config_keys = [
+            "mail", "proxy", "total", "threads", "checkout", "sub2api_sync",
+            "cpa_sync", "agent_identity_archive",
+        ]
         if runtime["target"] == "grok":
             config_keys.extend(["target", "grok"])
         backend.config.update(
@@ -1275,14 +1332,21 @@ class RegisterService:
             raise RuntimeError("内置 Grok 运行时未确认账号新增或已存在")
 
         refresh_summary = None
+        verification_pending = False
+        verification_error = ""
         if bool(getattr(client, "verify_on_import", True)):
-            refresh_result = client.refresh([token])
-            refresh_summary = _batch_summary(refresh_result, 1)
-            if refresh_summary["ok"] != 1 or refresh_summary["fail"] != 0:
-                raise RuntimeError(
-                    "Grok 账号验证失败: "
-                    f"ok={refresh_summary['ok']}, fail={refresh_summary['fail']}"
-                )
+            try:
+                refresh_result = client.refresh([token])
+                refresh_summary = _batch_summary(refresh_result, 1)
+                if refresh_summary["ok"] != 1 or refresh_summary["fail"] != 0:
+                    verification_pending = True
+                    verification_error = (
+                        "Grok 账号验证待复检: "
+                        f"ok={refresh_summary['ok']}, fail={refresh_summary['fail']}"
+                    )
+            except Exception as error:
+                verification_pending = True
+                verification_error = self._grok2api_error_text(error, [token])
         return {
             "id": account_id,
             "ok": True,
@@ -1290,6 +1354,8 @@ class RegisterService:
             "added": added,
             "skipped": skipped,
             "refresh_summary": refresh_summary,
+            "verification_pending": verification_pending,
+            "verification_error": verification_error,
         }
 
     def sync_grok_accounts(self, ids: list[str]) -> dict[str, Any]:
@@ -1796,7 +1862,12 @@ class RegisterService:
                 "error": self._grok2api_error_text(error, valid_tokens),
             }
 
-    def verify_grok_accounts_runtime(self, ids: list[str]) -> dict[str, Any]:
+    def verify_grok_accounts_runtime(
+        self,
+        ids: list[str],
+        *,
+        cancel_event: Any | None = None,
+    ) -> dict[str, Any]:
         """Verify registered Grok SSO sessions with one fast quota probe each.
 
         This intentionally accepts archive IDs rather than raw SSO values.  The
@@ -1832,8 +1903,19 @@ class RegisterService:
         unique_tokens = list(dict.fromkeys(token for _, token in candidates))
         if unique_tokens:
             try:
-                payload = self._grok2api_client().verify(unique_tokens)
+                _raise_if_grok_probe_cancelled(cancel_event)
+                client = self._grok2api_client()
+                payload = (
+                    client.verify(unique_tokens)
+                    if cancel_event is None
+                    else client.verify(unique_tokens, cancel_event=cancel_event)
+                )
+                _raise_if_grok_probe_cancelled(cancel_event)
+            except _GrokProbeCancelled:
+                raise
             except Exception as error:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _GrokProbeCancelled() from error
                 message = self._grok2api_error_text(error, unique_tokens)
                 for account_id, _token in candidates:
                     results[account_id] = {
@@ -1951,7 +2033,14 @@ class RegisterService:
                     return dict(item)
         return {}
 
-    def _recover_grok_account(self, account_id: str, client) -> dict[str, Any]:
+    def _recover_grok_account(
+        self,
+        account_id: str,
+        client,
+        *,
+        stop_event: Any | None = None,
+    ) -> dict[str, Any]:
+        _raise_if_grok_probe_cancelled(stop_event)
         current_items = grok_account_store.get_accounts_by_ids([account_id])
         if not current_items:
             return {"status": "failed", "error": "本地账号不存在"}
@@ -1992,44 +2081,9 @@ class RegisterService:
         new_sso = ""
         added_new = False
         old_deleted = False
-        try:
-            new_sso = self._authorize_grok_recovery_sso(email=email, password=password)
-            if new_sso != old_sso:
-                add_result = client.add([new_sso])
-                added = max(0, _safe_int(add_result.get("count"))) if isinstance(add_result, dict) else 0
-                skipped = max(0, _safe_int(add_result.get("skipped"))) if isinstance(add_result, dict) else 0
-                if added < 1 and skipped < 1:
-                    raise RuntimeError("内置 Grok 运行时未确认新 SSO 已加入")
-                added_new = added > 0
 
-            verification = self._grok_verification_for_token(client.verify([new_sso]), new_sso)
-            verify_status = _clean_text(verification.get("status")).lower()
-            if verify_status != "valid":
-                detail = _clean_text(verification.get("error"))
-                raise RuntimeError(detail or "新 Grok SSO 验证未通过")
-            quota = _verify_quota_brief(verification.get("quota"))
-
-            if new_sso != old_sso:
-                delete_result = client.delete([old_sso])
-                if isinstance(delete_result, dict) and "deleted" in delete_result:
-                    if max(0, _safe_int(delete_result.get("deleted"))) < 1:
-                        raise RuntimeError("内置 Grok 运行时未确认旧 SSO 已删除")
-                old_deleted = True
-
-            recovered_at = _now()
-            grok_account_store.replace_sso_after_recovery(
-                account_id,
-                expected_sso=old_sso,
-                new_sso=new_sso,
-                recovered_at=recovered_at,
-                quota=quota,
-            )
-            try:
-                self._reconcile_grok_runtime_archive(client)
-            except Exception:
-                pass
-            return {"status": "success"}
-        except Exception as error:
+        def rollback_runtime_changes() -> None:
+            nonlocal old_deleted
             if old_deleted:
                 try:
                     restored = client.add([old_sso])
@@ -2049,6 +2103,67 @@ class RegisterService:
                     client.delete([new_sso])
                 except Exception:
                     pass
+
+        try:
+            new_sso = self._authorize_grok_recovery_sso(email=email, password=password)
+            _raise_if_grok_probe_cancelled(stop_event)
+            if new_sso != old_sso:
+                add_result = client.add([new_sso])
+                added = max(0, _safe_int(add_result.get("count"))) if isinstance(add_result, dict) else 0
+                skipped = max(0, _safe_int(add_result.get("skipped"))) if isinstance(add_result, dict) else 0
+                if added < 1 and skipped < 1:
+                    raise RuntimeError("内置 Grok 运行时未确认新 SSO 已加入")
+                added_new = added > 0
+                _raise_if_grok_probe_cancelled(stop_event)
+
+            verify_payload = (
+                client.verify([new_sso])
+                if stop_event is None
+                else client.verify([new_sso], cancel_event=stop_event)
+            )
+            _raise_if_grok_probe_cancelled(stop_event)
+            verification = self._grok_verification_for_token(verify_payload, new_sso)
+            verify_status = _clean_text(verification.get("status")).lower()
+            if verify_status != "valid":
+                detail = _clean_text(verification.get("error"))
+                raise RuntimeError(detail or "新 Grok SSO 验证未通过")
+            quota = _verify_quota_brief(verification.get("quota"))
+
+            if new_sso != old_sso:
+                _raise_if_grok_probe_cancelled(stop_event)
+                delete_result = client.delete([old_sso])
+                if isinstance(delete_result, dict) and "deleted" in delete_result:
+                    if max(0, _safe_int(delete_result.get("deleted"))) < 1:
+                        raise RuntimeError("内置 Grok 运行时未确认旧 SSO 已删除")
+                old_deleted = True
+                _raise_if_grok_probe_cancelled(stop_event)
+
+            recovered_at = _now()
+            grok_account_store.replace_sso_after_recovery(
+                account_id,
+                expected_sso=old_sso,
+                new_sso=new_sso,
+                recovered_at=recovered_at,
+                quota=quota,
+            )
+            try:
+                self._reconcile_grok_runtime_archive(client)
+            except Exception:
+                pass
+            return {"status": "success"}
+        except _GrokProbeCancelled:
+            rollback_runtime_changes()
+            grok_account_store.update_recovery_state(
+                account_id,
+                status="pending",
+                last_attempt_at=attempted_at,
+                next_attempt_at="",
+                error="",
+                attempts=max(0, attempts - 1),
+            )
+            raise
+        except Exception as error:
+            rollback_runtime_changes()
 
             safe_error = self._grok_recovery_error_text(
                 error,
@@ -2241,7 +2356,12 @@ class RegisterService:
             return False
         return bool(sources)
 
-    def _queue_unlinked_grok_oauth_accounts(self, *, limit: int | None = None) -> dict[str, int]:
+    def _queue_unlinked_grok_oauth_accounts(
+        self,
+        *,
+        limit: int | None = None,
+        stop_event: Any | None = None,
+    ) -> dict[str, int]:
         summary = {
             "eligible": 0,
             "attempted": 0,
@@ -2262,6 +2382,7 @@ class RegisterService:
         summary["missing_credentials"] = missing_credentials
         max_attempts = len(sources) if limit is None else max(0, int(limit))
         for index, source in enumerate(sources):
+            _raise_if_grok_probe_cancelled(stop_event)
             if summary["attempted"] >= max_attempts:
                 summary["deferred"] += len(sources) - index
                 break
@@ -2303,10 +2424,37 @@ class RegisterService:
             probe.update(
                 {
                     "running": self._grok_probe_running,
-                    "next_run_at": self._grok_probe_next_run_at_locked(probe),
+                    "next_run_at": self._grok_probe_next_run_at_locked(probe) if probe["enabled"] else "",
                 }
             )
             return probe
+
+    def set_grok_probe_scheduler_enabled(self, enabled: bool) -> dict[str, Any]:
+        target = bool(enabled)
+        with self._lock:
+            probe = self._grok_probe_config_locked()
+            changed = bool(probe.get("enabled")) != target
+            probe["enabled"] = target
+            if changed and target:
+                # An explicit start should not wait for a stale interval deadline.
+                probe["last_finished_at"] = ""
+                # A new run gets a new signal.  An old cancelled run keeps its
+                # own set event and cannot resume after a rapid off/on toggle.
+                self._grok_probe_cancel_event = threading.Event()
+            elif not target:
+                self._grok_probe_cancel_event.set()
+            if changed:
+                self._append_grok_probe_event_locked(
+                    "Grok 账号自动轮询已开启" if target else "Grok 账号自动轮询已关闭",
+                    "success" if target else "warning",
+                )
+            self._save()
+        self._grok_probe_wake_event.set()
+        if not target:
+            # Cancellable HTTP probes observe the signal within 100 ms.  Do not
+            # hold the configuration lock while the worker unwinds.
+            self._grok_probe_idle_event.wait(timeout=1.0)
+        return self.grok_probe_scheduler_status()
 
     def start_grok_probe_scheduler(self, stop_event: threading.Event) -> threading.Thread:
         with self._lock:
@@ -2325,6 +2473,7 @@ class RegisterService:
             return thread
 
     def stop_grok_probe_scheduler(self) -> None:
+        self._grok_probe_cancel_event.set()
         self._grok_probe_wake_event.set()
         with self._lock:
             thread = self._grok_probe_scheduler_thread
@@ -2333,25 +2482,43 @@ class RegisterService:
 
     def _run_grok_probe_scheduler(self, stop_event: threading.Event) -> None:
         try:
-            with self._lock:
-                initial_probe = self._grok_probe_config_locked()
-                recovery_sweep_due = self._grok_oauth_recovery_sweep_due(initial_probe)
-            recovery_sweep_due = (
-                recovery_sweep_due
-                or self._grok_oauth_has_inflight_recovery()
-                or self._grok_oauth_has_unlinked_accounts()
-            )
-            if recovery_sweep_due and not stop_event.is_set():
-                self._run_grok_oauth_recovery_sweep(
-                    reclaim_inflight=True,
-                )
+            startup_checked = False
             while not stop_event.is_set():
-                permission_retry = self._run_grok_permission_retry_once(stop_event)
                 with self._lock:
                     probe = self._grok_probe_config_locked()
-                    should_run = self._grok_probe_due_locked(probe)
+                    enabled = bool(probe.get("enabled"))
+                    cancel_event = self._grok_probe_cancel_event
+                if not enabled:
+                    self._grok_probe_wake_event.wait(30)
+                    self._grok_probe_wake_event.clear()
+                    continue
+
+                cycle_stop = _GrokProbeStopSignal(stop_event, cancel_event)
+                if not startup_checked:
+                    recovery_sweep_due = self._grok_oauth_recovery_sweep_due(probe)
+                    recovery_sweep_due = (
+                        recovery_sweep_due
+                        or self._grok_oauth_has_inflight_recovery()
+                        or self._grok_oauth_has_unlinked_accounts()
+                    )
+                    if recovery_sweep_due and not cycle_stop.is_set():
+                        self._run_grok_oauth_recovery_sweep(
+                            reclaim_inflight=True,
+                            stop_event=cycle_stop,
+                        )
+                    startup_checked = True
+
+                permission_retry = self._run_grok_permission_retry_once(cycle_stop)
+                if cycle_stop.is_set():
+                    continue
+                with self._lock:
+                    probe = self._grok_probe_config_locked()
+                    should_run = bool(probe.get("enabled")) and self._grok_probe_due_locked(probe)
                 if should_run:
-                    self._run_grok_probe_once(stop_event)
+                    try:
+                        self._run_grok_probe_once(cycle_stop)
+                    except _GrokProbeCancelled:
+                        pass
                     continue
                 if permission_retry.get("tested", 0) > 0:
                     continue
@@ -2360,11 +2527,12 @@ class RegisterService:
         finally:
             with self._lock:
                 self._grok_probe_running = False
+                self._grok_probe_idle_event.set()
                 self._grok_probe_scheduler_thread = None
 
     def _run_grok_permission_retry_once(
         self,
-        stop_event: threading.Event | None = None,
+        stop_event: Any | None = None,
     ) -> dict[str, int]:
         summary = {"eligible": 0, "tested": 0, "valid": 0, "pending": 0, "failed": 0, "uploaded": 0}
         if stop_event is not None and stop_event.is_set():
@@ -2396,9 +2564,12 @@ class RegisterService:
             from services.xai_cli_oauth_service import xai_cli_oauth_service
 
             payload = asyncio.run(
-                xai_cli_oauth_service.probe_accounts(
-                    [_clean_text(item.get("id")) for item in selected],
-                    concurrency=_GROK_PERMISSION_RETRY_BATCH_SIZE,
+                _await_grok_probe_with_cancel(
+                    xai_cli_oauth_service.probe_accounts(
+                        [_clean_text(item.get("id")) for item in selected],
+                        concurrency=_GROK_PERMISSION_RETRY_BATCH_SIZE,
+                    ),
+                    stop_event,
                 )
             )
             results = payload.get("results") if isinstance(payload, dict) else []
@@ -2420,6 +2591,8 @@ class RegisterService:
                 f"其他失败 {summary['failed']}，已上传 {summary['uploaded']}",
                 level,
             )
+        except _GrokProbeCancelled:
+            return summary
         except Exception as error:
             summary["failed"] = len(selected)
             self._append_grok_oauth_log(
@@ -2433,6 +2606,7 @@ class RegisterService:
         *,
         limit: int | None = None,
         reclaim_inflight: bool = False,
+        stop_event: Any | None = None,
     ) -> dict[str, int]:
         summary = {
             "eligible": 0,
@@ -2449,7 +2623,9 @@ class RegisterService:
             "backfill_missing_credentials": 0,
         }
         error_text = ""
+        cancelled = False
         try:
+            _raise_if_grok_probe_cancelled(stop_event)
             oauth_items = xai_cli_oauth_store.list_accounts(redacted=False)
             candidates = [
                 item
@@ -2484,6 +2660,7 @@ class RegisterService:
             }
             max_attempts = len(candidates) if limit is None else max(0, int(limit))
             for index, candidate in enumerate(candidates):
+                _raise_if_grok_probe_cancelled(stop_event)
                 if summary["attempted"] >= max_attempts:
                     summary["deferred"] += len(candidates) - index
                     break
@@ -2501,46 +2678,51 @@ class RegisterService:
                     summary["failed"] += 1
                 else:
                     summary["deferred"] += 1
-            backfill = self._queue_unlinked_grok_oauth_accounts()
+            backfill = self._queue_unlinked_grok_oauth_accounts(stop_event=stop_event)
             for key, value in backfill.items():
                 summary[f"backfill_{key}"] = value
+        except _GrokProbeCancelled:
+            cancelled = True
         except Exception as error:
             error_text = self._grok_recovery_error_text(error)
         finally:
-            swept_at = _now()
-            with self._lock:
-                probe = self._grok_probe_config_locked()
-                probe["oauth_recovery_last_sweep_at"] = swept_at
-                if error_text:
-                    message = f"Grok OAuth 恢复扫描失败：{error_text}"
-                    level = "error"
-                else:
-                    message = (
-                        "Grok OAuth 恢复扫描完成："
-                        f"失效恢复排队 {summary['queued']}，启动失败 {summary['failed']}，延后 {summary['deferred']}；"
-                        f"未授权新排队 {summary['backfill_queued']}，队列中 {summary['backfill_reused']}，"
-                        f"启动失败 {summary['backfill_failed']}，延后 {summary['backfill_deferred']}"
-                    )
-                    level = "warning" if (
-                        summary["failed"]
-                        or summary["deferred"]
-                        or summary["backfill_failed"]
-                        or summary["backfill_deferred"]
-                        or summary["backfill_missing_credentials"]
-                    ) else "success"
-                self._append_grok_probe_event_locked(message, level)
-                self._save()
-            self._append_grok_oauth_log(
-                message,
-                "red" if level == "error" else "yellow" if level == "warning" else "green",
-            )
+            if not cancelled:
+                swept_at = _now()
+                with self._lock:
+                    probe = self._grok_probe_config_locked()
+                    probe["oauth_recovery_last_sweep_at"] = swept_at
+                    if error_text:
+                        message = f"Grok OAuth 恢复扫描失败：{error_text}"
+                        level = "error"
+                    else:
+                        message = (
+                            "Grok OAuth 恢复扫描完成："
+                            f"失效恢复排队 {summary['queued']}，启动失败 {summary['failed']}，延后 {summary['deferred']}；"
+                            f"未授权新排队 {summary['backfill_queued']}，队列中 {summary['backfill_reused']}，"
+                            f"启动失败 {summary['backfill_failed']}，延后 {summary['backfill_deferred']}"
+                        )
+                        level = "warning" if (
+                            summary["failed"]
+                            or summary["deferred"]
+                            or summary["backfill_failed"]
+                            or summary["backfill_deferred"]
+                            or summary["backfill_missing_credentials"]
+                        ) else "success"
+                    self._append_grok_probe_event_locked(message, level)
+                    self._save()
+                self._append_grok_oauth_log(
+                    message,
+                    "red" if level == "error" else "yellow" if level == "warning" else "green",
+                )
         return summary
 
-    def _run_grok_probe_once(self, stop_event: threading.Event | None = None) -> dict[str, int]:
+    def _run_grok_probe_once(self, stop_event: Any | None = None) -> dict[str, int]:
+        _raise_if_grok_probe_cancelled(stop_event)
         with self._lock:
             if self._grok_probe_running:
                 return {}
             self._grok_probe_running = True
+            self._grok_probe_idle_event.clear()
             probe = self._grok_probe_config_locked()
             probe["last_started_at"] = _now()
             probe["last_error"] = ""
@@ -2581,10 +2763,18 @@ class RegisterService:
             "oauth_backfill_missing_credentials": 0,
         }
         errors: list[str] = []
+        cancelled = False
         try:
             try:
+                _raise_if_grok_probe_cancelled(stop_event)
                 client = self._grok2api_client()
-                remote_items = self._runtime_tokens(client.list())
+                list_payload = (
+                    client.list()
+                    if stop_event is None
+                    else client.list(cancel_event=stop_event)
+                )
+                remote_items = self._runtime_tokens(list_payload)
+                _raise_if_grok_probe_cancelled(stop_event)
                 grok_account_store.reconcile_runtime_accounts(remote_items)
                 remote_by_token = {
                     token: item
@@ -2609,10 +2799,13 @@ class RegisterService:
                 summary["skipped"] = max(0, len(raw_items) - len(eligible_ids))
 
                 for offset in range(0, len(eligible_ids), batch_size):
-                    if stop_event is not None and stop_event.is_set():
-                        break
+                    _raise_if_grok_probe_cancelled(stop_event)
                     batch_ids = eligible_ids[offset:offset + batch_size]
-                    payload = self.verify_grok_accounts_runtime(batch_ids)
+                    payload = self.verify_grok_accounts_runtime(
+                        batch_ids,
+                        cancel_event=stop_event,
+                    )
+                    _raise_if_grok_probe_cancelled(stop_event)
                     results = payload.get("results") if isinstance(payload, dict) else []
                     results = results if isinstance(results, list) else []
                     probed_at = _now()
@@ -2628,10 +2821,12 @@ class RegisterService:
                         candidate = raw_by_id.get(account_id)
                         if not isinstance(candidate, dict):
                             continue
-                        if stop_event is not None and stop_event.is_set():
-                            summary["recovery_deferred"] += 1
-                            continue
-                        recovery = self._recover_grok_account(account_id, client)
+                        _raise_if_grok_probe_cancelled(stop_event)
+                        recovery = self._recover_grok_account(
+                            account_id,
+                            client,
+                            stop_event=stop_event,
+                        )
                         recovery_status = _clean_text(recovery.get("status")).lower()
                         if recovery_status == "success":
                             summary["recovery_attempted"] += 1
@@ -2641,10 +2836,13 @@ class RegisterService:
                             summary["recovery_failed"] += 1
                         else:
                             summary["recovery_deferred"] += 1
+            except _GrokProbeCancelled:
+                raise
             except Exception as error:
                 errors.append(f"SSO: {self._grok2api_error_text(error)}")
 
             try:
+                _raise_if_grok_probe_cancelled(stop_event)
                 from services.xai_cli_oauth_service import XaiCliOAuthService, xai_cli_oauth_service
 
                 oauth_items = xai_cli_oauth_store.list_accounts(redacted=False)
@@ -2675,15 +2873,18 @@ class RegisterService:
                 summary["oauth_eligible"] = len(oauth_eligible_ids)
                 summary["oauth_skipped"] = max(0, len(oauth_items) - len(oauth_eligible_ids))
                 for offset in range(0, len(oauth_eligible_ids), batch_size):
-                    if stop_event is not None and stop_event.is_set():
-                        break
+                    _raise_if_grok_probe_cancelled(stop_event)
                     batch_ids = oauth_eligible_ids[offset:offset + batch_size]
                     payload = asyncio.run(
-                        oauth_service.probe_accounts(
-                            batch_ids,
-                            concurrency=min(10, len(batch_ids)),
+                        _await_grok_probe_with_cancel(
+                            oauth_service.probe_accounts(
+                                batch_ids,
+                                concurrency=min(10, len(batch_ids)),
+                            ),
+                            stop_event,
                         )
                     )
+                    _raise_if_grok_probe_cancelled(stop_event)
                     results = payload.get("results") if isinstance(payload, dict) else []
                     results = results if isinstance(results, list) else []
                     summary["oauth_batches"] += 1
@@ -2699,6 +2900,7 @@ class RegisterService:
                         if not isinstance(candidate, dict):
                             summary["oauth_recovery_deferred"] += 1
                             continue
+                        _raise_if_grok_probe_cancelled(stop_event)
                         recovery = self._recover_grok_oauth_account(
                             {**candidate, "status": "invalid", "probe": {"status": "invalid"}},
                             source_by_email,
@@ -2712,26 +2914,38 @@ class RegisterService:
                             summary["oauth_recovery_failed"] += 1
                         else:
                             summary["oauth_recovery_deferred"] += 1
+            except _GrokProbeCancelled:
+                raise
             except Exception as error:
                 errors.append(f"OAuth: {self._grok2api_error_text(error)}")
 
             try:
-                backfill = self._queue_unlinked_grok_oauth_accounts()
+                _raise_if_grok_probe_cancelled(stop_event)
+                backfill = self._queue_unlinked_grok_oauth_accounts(stop_event=stop_event)
                 for key, value in backfill.items():
                     summary[f"oauth_backfill_{key}"] = value
+            except _GrokProbeCancelled:
+                raise
             except Exception as error:
                 errors.append(f"OAuth 回填: {self._grok2api_error_text(error)}")
+        except _GrokProbeCancelled:
+            cancelled = True
         finally:
             error_text = "；".join(errors)
             finished_at = _now()
             with self._lock:
                 probe = self._grok_probe_config_locked()
-                probe["last_finished_at"] = finished_at
-                probe["oauth_recovery_last_sweep_at"] = finished_at
+                if not cancelled:
+                    probe["last_finished_at"] = finished_at
+                    probe["oauth_recovery_last_sweep_at"] = finished_at
                 probe["last_result"] = dict(summary)
-                probe["last_error"] = error_text[:500]
+                probe["last_error"] = "" if cancelled else error_text[:500]
                 self._grok_probe_running = False
-                if error_text:
+                self._grok_probe_idle_event.set()
+                if cancelled:
+                    message = "Grok 账号探测已停止"
+                    level = "warning"
+                elif error_text:
                     message = f"Grok 账号探测失败：{error_text}"
                     level = "error"
                 else:
@@ -2893,7 +3107,7 @@ class RegisterService:
             if _safe_bool(config.get("grok2api_enabled"), False):
                 token = _normalize_bridge_sso(item.get("sso"))
                 try:
-                    self._sync_grok_account_to_runtime(item)
+                    sync_result = self._sync_grok_account_to_runtime(item)
                 except Exception as error:
                     self._append_log(
                         "导入内置 Grok 账号池失败: "
@@ -2902,6 +3116,13 @@ class RegisterService:
                     )
                 else:
                     runtime_synced = True
+                    if bool(sync_result.get("verification_pending")):
+                        verification_error = _clean_text(sync_result.get("verification_error")) or "上游暂未返回可用性结果"
+                        self._append_log(
+                            "Grok 账号已加入内置账号池，验证待复检: "
+                            f"{email}，原因: {verification_error}",
+                            "yellow",
+                        )
             self._append_log(
                 f"Grok 账号已保存{'并加入账号池' if runtime_synced else ''}：{email}",
                 "green",
@@ -2930,14 +3151,14 @@ class RegisterService:
         item = saved.get("item") if isinstance(saved.get("item"), dict) else {}
         account_id = _clean_text(item.get("id"))
         email = _clean_text(item.get("email"))
-        masked_email = self._mask_email(email)
+        log_email = email or "未知账号"
         if not account_id or self._grok_oauth_protocol_sink is None:
             return
         try:
             started = self._grok_oauth_protocol_sink(account_id, prioritize=True)
         except Exception as error:
             self._append_grok_oauth_log(
-                f"Grok OAuth 协议授权启动失败: {masked_email}，原因: {self._grok2api_error_text(error)}",
+                f"Grok OAuth 协议授权启动失败: {log_email}，原因: {self._grok2api_error_text(error)}",
                 "red",
             )
             return
@@ -2948,19 +3169,19 @@ class RegisterService:
         else:
             state = "已启动"
         self._append_grok_oauth_log(
-            f"Grok OAuth 授权{state}：{masked_email}",
+            f"Grok OAuth 授权{state}：{log_email}",
             "yellow",
         )
 
     def handle_grok_oauth_protocol_event(self, event: dict[str, Any]) -> None:
         email = _clean_text(event.get("email"))
-        masked_email = self._mask_email(email)
+        log_email = email or "未知账号"
         job_id = _clean_text(event.get("job_id"))
         recovery_account = xai_cli_oauth_store.find_by_recovery_job_id(job_id) if job_id else None
         recovery_account_id = _clean_text(recovery_account.get("id")) if isinstance(recovery_account, dict) else ""
         if _clean_text(event.get("status")) == "permission_pending":
             self._append_grok_oauth_log(
-                f"Grok OAuth 授权完成，Grok 4.5 权限待生效，已进入延迟复检：{masked_email}",
+                f"Grok OAuth 授权完成，Grok 4.5 权限待生效，已进入延迟复检：{log_email}",
                 "yellow",
             )
             return
@@ -2984,7 +3205,7 @@ class RegisterService:
                 )
             else:
                 self._append_grok_oauth_log(
-                    f"Grok OAuth 协议授权失败：{masked_email}，原因: {error}",
+                    f"Grok OAuth 协议授权失败：{log_email}，原因: {error}",
                     "red",
                 )
             return
@@ -3017,20 +3238,20 @@ class RegisterService:
             suffix = f"；{len(failed)} 个投递目标失败" if failed else ""
             action = "自动恢复完成" if recovery_account_id else "授权完成"
             self._append_grok_oauth_log(
-                f"Grok OAuth {action}，已上传到 {targets}：{masked_email}{suffix}",
+                f"Grok OAuth {action}，已上传到 {targets}：{log_email}{suffix}",
                 "green",
             )
         elif failed:
             targets = "、".join("NovaApi" if name == "sub2api" else name.upper() for name in failed)
             action = "自动恢复完成" if recovery_account_id else "授权完成"
             self._append_grok_oauth_log(
-                f"Grok OAuth {action}，但上传到 {targets} 失败：{masked_email}",
+                f"Grok OAuth {action}，但上传到 {targets} 失败：{log_email}",
                 "red",
             )
         else:
             action = "自动恢复完成" if recovery_account_id else "授权完成"
             self._append_grok_oauth_log(
-                f"Grok OAuth {action}，未启用外部投递：{masked_email}",
+                f"Grok OAuth {action}，未启用外部投递：{log_email}",
                 "yellow",
             )
 

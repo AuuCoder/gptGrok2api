@@ -83,6 +83,7 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             "id": "grok-source-one",
             "email": "source@example.com",
             "password": "source-password",
+            "sso": "source-sso",
             "status": "active",
         }
         credential = {
@@ -91,7 +92,8 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             "id_token": "",
             "expires_in": 3600,
         }
-        protocol = SimpleNamespace(authorize=lambda **_kwargs: credential)
+        authorize = MagicMock(return_value=credential)
+        protocol = SimpleNamespace(authorize=authorize)
         events: list[dict[str, object]] = []
         self.service.protocol_event_sink = events.append
 
@@ -122,12 +124,18 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["status"], "authorized")
         self.assertEqual(job["models"], ["grok-4.5"])
         self.assertNotIn("source-password", repr(job))
+        self.assertNotIn("source-sso", repr(job))
         self.assertNotIn("protocol-refresh", repr(job))
+        authorize.assert_called_once_with(
+            email="source@example.com",
+            password="source-password",
+            sso="source-sso",
+        )
         self.assertEqual(self.store.list_accounts()[0]["source_type"], "registered_account_protocol")
         self.assertEqual(events[-1]["job_id"], job_id)
         self.assertEqual(events[-1]["oauth_account_id"], self.store.list_accounts()[0]["id"])
 
-    async def test_protocol_permission_denied_waits_without_external_delivery(self) -> None:
+    async def test_protocol_spending_limit_waits_without_external_delivery(self) -> None:
         source = {
             "id": "grok-permission-pending",
             "email": "pending@example.com",
@@ -159,9 +167,9 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(
                 return_value={
                     "status": "invalid",
-                    "http_status": 403,
-                    "code": "permission-denied",
-                    "error": "permission pending",
+                    "http_status": 402,
+                    "code": "personal-team-blocked:spending-limit",
+                    "error": "subscription or credits required",
                 }
             ),
         ), patch(
@@ -179,6 +187,59 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["stage"], "permission_pending")
         self.assertEqual(events[-1]["status"], "permission_pending")
         deliver.assert_not_called()
+
+    async def test_protocol_can_use_reference_pkce_flow(self) -> None:
+        source = {
+            "id": "grok-pkce-source",
+            "email": "pkce@example.com",
+            "password": "source-password",
+            "sso": "source-sso",
+        }
+        credential = {
+            "access_token": _jwt({"sub": "pkce-subject", "email": "pkce@example.com", "exp": int(time.time()) + 3600}),
+            "refresh_token": "pkce-refresh",
+            "id_token": "",
+            "expires_in": 3600,
+        }
+        authorize = MagicMock(return_value=credential)
+        protocol = SimpleNamespace(authorize=authorize, progress=None)
+
+        with patch.object(self.service, "_select_protocol_source_account", return_value=source), patch(
+            "services.register_service.register_service.get",
+            return_value={
+                "grok": {
+                    "xai_cli_oauth_flow": "pkce_reference",
+                    "xai_cli_pkce_reference_dir": "/reference",
+                },
+                "proxy": "direct",
+            },
+        ), patch(
+            "services.xai_reference_pkce_protocol.XaiReferencePkceProtocol",
+            return_value=protocol,
+        ), patch.object(
+            self.service,
+            "_fetch_models",
+            new=AsyncMock(return_value=["grok-4.5"]),
+        ), patch.object(
+            self.service,
+            "probe_account",
+            new=AsyncMock(return_value={"status": "valid"}),
+        ):
+            started = await self.service.start_protocol_authorization("grok-pkce-source")
+            job_id = started["job"]["id"]
+            for _ in range(50):
+                await asyncio.sleep(0)
+                job = self.service.get_protocol_authorization_job(job_id)
+                if job and job["status"] not in {"pending", "running"}:
+                    break
+
+        self.assertEqual(job["status"], "authorized")
+        self.assertEqual(self.store.list_accounts()[0]["source_type"], "registered_account_pkce_reference")
+        authorize.assert_called_once_with(
+            email="pkce@example.com",
+            password="source-password",
+            sso="source-sso",
+        )
 
     async def test_protocol_jobs_are_reused_per_source_account(self) -> None:
         first = {"id": "grok-one", "email": "one@example.com", "password": "password"}
@@ -199,6 +260,22 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(one_reused["job"]["id"], one["job"]["id"])
         self.assertFalse(two["reused"])
         self.assertNotEqual(two["job"]["id"], one["job"]["id"])
+
+    def test_protocol_source_accepts_saved_sso_without_password(self) -> None:
+        source = {
+            "id": "grok-sso-only",
+            "email": "sso-only@example.com",
+            "password": "",
+            "sso": "saved-sso",
+            "status": "active",
+        }
+        with patch(
+            "services.register.grok_account_store.grok_account_store.get_accounts_by_ids",
+            return_value=[source],
+        ):
+            selected = self.service._select_protocol_source_account("grok-sso-only")
+
+        self.assertEqual(selected, source)
 
     async def test_protocol_authorization_stays_successful_when_one_delivery_target_fails(self) -> None:
         source = {

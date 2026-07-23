@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from api.support import require_admin
 from services.register_service import GrokAccountChatTestError, register_service
+from services.openai_survival_service import openai_survival_service
 
 
 class RegisterConfigRequest(BaseModel):
@@ -20,6 +21,7 @@ class RegisterConfigRequest(BaseModel):
     mail: dict | None = None
     checkout: dict | None = None
     sub2api_sync: dict | None = None
+    agent_identity_archive: dict | None = None
     proxy: str | None = None
     total: int | None = None
     threads: int | None = None
@@ -43,6 +45,13 @@ class GptMailStatusRequest(BaseModel):
     force: bool | None = None
 
 
+class OpenAISurvivalConfigRequest(BaseModel):
+    enabled: bool | None = None
+    interval_minutes: int | None = Field(default=None, ge=15, le=1440)
+    concurrency: int | None = Field(default=None, ge=1, le=8)
+    refresh_codex_rt: bool | None = None
+
+
 class GrokAccountIdsRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
 
@@ -53,6 +62,10 @@ class GrokAccountDeleteRequest(GrokAccountIdsRequest):
 
 class GrokAccountDisabledRequest(GrokAccountIdsRequest):
     disabled: bool
+
+
+class GrokProbePollingRequest(BaseModel):
+    enabled: bool
 
 
 class GrokAccountChatTestRequest(BaseModel):
@@ -144,6 +157,31 @@ def create_router() -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.get("/api/register/openai/survival")
+    async def get_openai_survival(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"survival": openai_survival_service.status()}
+
+    @router.post("/api/register/openai/survival")
+    async def update_openai_survival(
+        body: OpenAISurvivalConfigRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            status = openai_survival_service.update_config(body.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"survival": status}
+
+    @router.post("/api/register/openai/survival/run")
+    async def run_openai_survival(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {
+            "started": openai_survival_service.run_now(),
+            "survival": openai_survival_service.status(),
+        }
+
     @router.get("/api/register/grok/accounts")
     async def list_grok_accounts(
         page: int = Query(default=1, ge=1),
@@ -171,7 +209,16 @@ def create_router() -> APIRouter:
             "summary": view.get("summary") if isinstance(view.get("summary"), dict) else {},
             "runtime_available": bool(view.get("runtime_available")),
             "runtime_error": str(view.get("runtime_error") or ""),
+            "probe_scheduler": register_service.grok_probe_scheduler_status(),
         }
+
+    @router.post("/api/register/grok/probe-polling")
+    async def set_grok_probe_polling(
+        body: GrokProbePollingRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        return {"probe_scheduler": register_service.set_grok_probe_scheduler_enabled(body.enabled)}
 
     @router.post("/api/register/grok/accounts/runtime/snapshot")
     async def refresh_grok_runtime_snapshot(authorization: str | None = Header(default=None)):

@@ -50,6 +50,14 @@ docker compose -f docker-compose.warp.yml --profile local-icloud up -d
 
 定时创建按账号执行：新接口每个账号每小时最多 `20` 个，旧接口每个账号每小时最多 `5` 个；两种登录态都保存后每小时最多 `25` 个。每个账号累计达到 `750` 个后自动停止该账号，所有账号达到目标后定时器自动结束。控制台支持按选中账号启动定时创建，默认每 `60` 分钟执行一轮；邮箱卡片可直接查看或复制邮箱地址、单邮箱 API 及 `邮箱----API` 组合。
 
+## OpenAI 注册归档与存活追踪
+
+Outlook Token 邮箱池使用 `data/outlook_token_used.db` 原子预占邮箱，支持多进程注册；旧版 `data/outlook_token_used.json` 会在首次访问时自动迁移。每次领取都有独立 lease，超时 worker 不会覆盖邮箱后来产生的新状态。
+
+OpenAI 注册默认把 Agent Identity 独立加密归档到 `data/openai_agent_identities.db`，密钥保存在权限为 `0600` 的 `data/openai_agent_identities.key`，私钥不会写入普通账号列表。账号页可以导出单账号 `auth.json` 或多账号 ZIP；列表元数据接口为 `GET /api/accounts/agent-identities`。
+
+OpenAI 存活追踪默认每 `60` 分钟运行，并通过跨进程 scheduler lease 避免重复探测。配置、状态和手动执行接口分别为 `POST /api/register/openai/survival`、`GET /api/register/openai/survival` 和 `POST /api/register/openai/survival/run`；Token 失效或网络错误只记为本次探测失败，不会直接把账号判定为停用。
+
 ## Grok 后台探测与自动恢复
 
 Grok 账号探测随服务启动自动在后台运行，无需在账号管理页手动启用或点击执行。默认每 `60` 分钟运行一轮，每批处理 `50` 个账号；首次启动且没有历史完成记录时会立即执行。

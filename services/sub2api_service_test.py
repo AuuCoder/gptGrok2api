@@ -31,13 +31,18 @@ class OpenAIAgentIdentityTest(unittest.TestCase):
         session = MagicMock()
         session.post.return_value = _Response(200, {"agent_runtime_id": "agent-new"})
 
-        with patch("services.sub2api_service.Session", return_value=session):
+        with patch("services.sub2api_service.Session", return_value=session), patch.object(
+            sub2api_service.openai_agent_identity_store,
+            "get",
+            return_value=None,
+        ), patch.object(sub2api_service.openai_agent_identity_store, "save") as save_identity:
             auth = sub2api_service._build_openai_agent_identity(account)
 
         identity = auth["agent_identity"]
         self.assertEqual(auth["auth_mode"], "agentIdentity")
         self.assertEqual(identity["account_id"], "auth0|account-subject")
         self.assertEqual(identity["chatgpt_user_id"], "user-new")
+        save_identity.assert_called_once()
 
 
 class Sub2APIAccountSyncTest(unittest.TestCase):

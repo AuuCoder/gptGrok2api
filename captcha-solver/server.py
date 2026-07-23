@@ -208,8 +208,8 @@ class SolveRequest(BaseModel):
         "type=turnstile, cloudflare and awswaf (overrides the shared TURNSTILE_PROXY env fallback). "
         "For reCAPTCHA set RECAPTCHA_PROXY instead.")
     concurrency: Optional[int] = Field(
-        None, ge=1, le=16, description="Turnstile-only maximum simultaneous browser attempts. "
-        "Overrides TURNSTILE_CONCURRENCY for requests using the same limit.")
+        None, ge=0, le=64, description="Turnstile-only maximum simultaneous browser attempts. "
+        "Use 0 for unlimited; otherwise overrides TURNSTILE_CONCURRENCY.")
 
     # reCAPTCHA-only
     version: Optional[str] = Field(None, description="reCAPTCHA only: v2 | v3 | invisible (default v2).")

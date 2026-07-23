@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from services.account_service import account_service
 from services.config import DATA_DIR, config
 from services.json_file import read_json_file, write_json_file
+from services.openai_agent_identity_store import openai_agent_identity_store
 from services.xai_cli_oauth_protocol import XAI_CLI_BASE_URL, XAI_OAUTH_CLIENT_ID, XAI_OAUTH_SCOPE
 
 
@@ -877,6 +878,10 @@ def _build_openai_agent_identity(account: dict) -> dict[str, Any]:
     if not account_id or not user_id:
         raise Sub2APISyncError("本地账号 JWT 缺少 ChatGPT 账号标识")
 
+    archived = openai_agent_identity_store.get(account_id)
+    if archived:
+        return {**archived, "auth_mode": "agentIdentity"}
+
     private_key = Ed25519PrivateKey.generate()
     private_key_b64 = base64.b64encode(private_key.private_bytes(
         encoding=Encoding.DER,
@@ -945,7 +950,7 @@ def _build_openai_agent_identity(account: dict) -> dict[str, Any]:
     if not agent_runtime_id:
         raise Sub2APISyncError("OpenAI 未返回 Agent Runtime ID")
 
-    return {
+    auth_json = {
         "auth_mode": "agentIdentity",
         "agent_identity": {
             "agent_runtime_id": agent_runtime_id,
@@ -957,6 +962,14 @@ def _build_openai_agent_identity(account: dict) -> dict[str, Any]:
             "chatgpt_account_is_fedramp": False,
         },
     }
+    openai_agent_identity_store.save({**auth_json, "auth_mode": "agent_identity"})
+    return auth_json
+
+
+def ensure_openai_agent_identity(account: dict) -> dict[str, Any]:
+    """Create or reuse an archived Agent Identity in Codex auth.json format."""
+    auth_json = _build_openai_agent_identity(account)
+    return {**auth_json, "auth_mode": "agent_identity"}
 
 
 def _xai_sync_credentials(account: dict) -> dict[str, str]:

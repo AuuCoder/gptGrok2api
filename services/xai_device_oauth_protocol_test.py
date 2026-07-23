@@ -105,12 +105,15 @@ class DeviceConsentFormTest(unittest.TestCase):
 
     def test_rejects_untrusted_approval_host(self) -> None:
         html = self.HTML.replace("https://auth.x.ai", "https://invalid.example")
-        with self.assertRaisesRegex(XaiDeviceOAuthProtocolError, "not found"):
+        with self.assertRaisesRegex(XaiDeviceOAuthProtocolError, "not found") as raised:
             parse_device_consent_form(
                 html,
                 base_url="https://accounts.x.ai/oauth2/device/consent",
                 user_code="ABCD-EFGH",
             )
+
+        self.assertEqual(raised.exception.stage, "consent")
+        self.assertTrue(raised.exception.retryable)
 
     def test_turnstile_solver_reuses_protocol_proxy(self) -> None:
         protocol = XaiDeviceOAuthProtocol({}, proxy="socks5h://proxy.example:1080")
@@ -121,6 +124,155 @@ class DeviceConsentFormTest(unittest.TestCase):
 
         direct = XaiDeviceOAuthProtocol({}, proxy="direct")
         self.assertNotIn("proxy", direct._turnstile_solver_config())
+
+    def test_saved_sso_authorizes_without_password_login_or_turnstile(self) -> None:
+        def response(*, status: int = 200, url: str = "", headers=None, payload=None, text: str = ""):
+            item = MagicMock()
+            item.status_code = status
+            item.url = url
+            item.headers = headers or {}
+            item.text = text
+            item.json.return_value = payload or {}
+            return item
+
+        client = MagicMock()
+        client._request.side_effect = [
+            response(payload={"device_code": "device-code", "user_code": "ABCD-EFGH", "expires_in": 300}),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/oauth2/device/consent?user_code=ABCD-EFGH"},
+            ),
+            response(
+                url="https://accounts.x.ai/oauth2/device/consent?user_code=ABCD-EFGH",
+                text=self.HTML,
+            ),
+            response(status=302, url="https://auth.x.ai/oauth2/device/approve"),
+            response(payload={"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 21_600}),
+        ]
+
+        with patch("services.xai_device_oauth_protocol.GrokProtocolClient", return_value=client), patch(
+            "services.xai_device_oauth_protocol.TurnstileSolver",
+        ) as solver_type:
+            result = XaiDeviceOAuthProtocol({}, proxy="direct").authorize(
+                email="person@example.com",
+                password="",
+                sso="saved-sso-token",
+            )
+
+        self.assertEqual(result["access_token"], "access-token")
+        self.assertEqual(result["sso"], "saved-sso-token")
+        client.session.cookies.set.assert_called_once_with(
+            "sso",
+            "saved-sso-token",
+            domain=".x.ai",
+            path="/",
+            secure=True,
+        )
+        client.bootstrap.assert_not_called()
+        client.create_castle_token.assert_not_called()
+        solver_type.assert_not_called()
+        self.assertNotIn("saved-sso-token", repr(client._request.call_args_list))
+
+    def test_expired_saved_sso_falls_back_to_password_login(self) -> None:
+        def response(*, status: int = 200, url: str = "", headers=None, payload=None, text: str = ""):
+            item = MagicMock()
+            item.status_code = status
+            item.url = url
+            item.headers = headers or {}
+            item.text = text
+            item.json.return_value = payload or {}
+            return item
+
+        client = MagicMock()
+        client.base_url = "https://accounts.x.ai"
+        client.bootstrap.return_value = SimpleNamespace(sitekey="turnstile-sitekey")
+        client.create_castle_token.return_value = "castle-token"
+        client._cookie_value_for_domain.return_value = "new-sso-token"
+        client._request.side_effect = [
+            response(payload={"device_code": "device-code", "user_code": "ABCD-EFGH", "expires_in": 300}),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/sign-in"},
+            ),
+            response(status=401, url="https://accounts.x.ai/sign-in"),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/sign-in"},
+            ),
+            response(url="https://accounts.x.ai/sign-in"),
+            response(payload={"response": {"createSessionResponse": {"authenticated": True}}}),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/oauth2/device/consent"},
+            ),
+            response(url="https://accounts.x.ai/oauth2/device/consent", text=self.HTML),
+            response(status=302, url="https://auth.x.ai/oauth2/device/approve"),
+            response(payload={"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 21_600}),
+        ]
+        solver = MagicMock()
+        solver.solve.return_value = "turnstile-token"
+
+        with patch("services.xai_device_oauth_protocol.GrokProtocolClient", return_value=client), patch(
+            "services.xai_device_oauth_protocol.TurnstileSolver",
+            return_value=solver,
+        ):
+            result = XaiDeviceOAuthProtocol({}, proxy="direct").authorize(
+                email="person@example.com",
+                password="password",
+                sso="expired-sso-token",
+            )
+
+        self.assertEqual(result["access_token"], "access-token")
+        self.assertEqual(result["sso"], "new-sso-token")
+        client.session.cookies.delete.assert_called_once_with("sso", domain=".x.ai", path="/")
+        client.bootstrap.assert_called_once_with()
+        client.create_castle_token.assert_called_once_with(page_url="https://accounts.x.ai/sign-in")
+        solver.solve.assert_called_once_with(
+            website_url="https://accounts.x.ai/sign-in",
+            sitekey="turnstile-sitekey",
+        )
+
+    def test_expired_saved_sso_without_password_stops_before_login_fallback(self) -> None:
+        def response(*, status: int = 200, url: str = "", headers=None, payload=None):
+            item = MagicMock()
+            item.status_code = status
+            item.url = url
+            item.headers = headers or {}
+            item.json.return_value = payload or {}
+            return item
+
+        client = MagicMock()
+        client._request.side_effect = [
+            response(payload={"device_code": "device-code", "user_code": "ABCD-EFGH", "expires_in": 300}),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/sign-in"},
+            ),
+            response(status=401, url="https://accounts.x.ai/sign-in"),
+        ]
+
+        with patch("services.xai_device_oauth_protocol.GrokProtocolClient", return_value=client), patch(
+            "services.xai_device_oauth_protocol.TurnstileSolver",
+        ) as solver_type:
+            with self.assertRaisesRegex(
+                XaiDeviceOAuthProtocolError,
+                "no login password",
+            ) as raised:
+                XaiDeviceOAuthProtocol({}, proxy="direct").authorize(
+                    email="person@example.com",
+                    password="",
+                    sso="expired-sso-token",
+                )
+
+        self.assertEqual(raised.exception.stage, "sso")
+        client.session.cookies.delete.assert_called_once_with("sso", domain=".x.ai", path="/")
+        client.bootstrap.assert_not_called()
+        solver_type.assert_not_called()
 
     def test_password_login_accepts_auth_x_ai_navigation(self) -> None:
         def response(*, status: int = 200, url: str = "", headers=None, payload=None, text: str = ""):

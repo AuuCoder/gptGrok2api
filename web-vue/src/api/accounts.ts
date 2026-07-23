@@ -16,6 +16,14 @@ export interface Account {
   user_id?: string
   type?: string
   source_type?: string
+  agent_identity_status?: string
+  agent_runtime_id?: string
+  survival_status?: string
+  survival_alive?: boolean | null
+  survival_last_checked_at?: string
+  survival_last_confirmed_at?: string
+  survival_observed_seconds?: number
+  survival_plan_type?: string
   proxy?: string
   group_id?: string
   checkout_link_status?: CheckoutLinkStatus
@@ -435,6 +443,14 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     user_id: userId,
     type,
     source_type: sourceType,
+    agent_identity_status: cleanString(item.agent_identity_status),
+    agent_runtime_id: cleanString(item.agent_runtime_id),
+    survival_status: cleanString(item.survival_status),
+    survival_alive: item.survival_alive === null ? null : optionalBoolean(item.survival_alive),
+    survival_last_checked_at: cleanString(item.survival_last_checked_at),
+    survival_last_confirmed_at: cleanString(item.survival_last_confirmed_at),
+    survival_observed_seconds: optionalNonNegativeInteger(item.survival_observed_seconds),
+    survival_plan_type: cleanString(item.survival_plan_type),
     proxy: cleanString(item.proxy),
     group_id: cleanString(item.group_id),
     checkout_link_status: checkoutStatus || (checkoutFinalUrl ? 'ready' : ''),
@@ -893,8 +909,8 @@ export const accountsApi = {
     onProgress?: (progress: AccountRefreshProgress) => void,
   ) => refreshAndPollWithProgress([], onProgress, { all: true }),
 
-  exportAccounts: (accountIdsOrTokens: string[], format: 'json' | 'zip' | 'cpa' | 'sub2api' = 'json') =>
-    apiClient.post<{ access_tokens: string[]; format: 'json' | 'zip' | 'cpa' | 'sub2api' }, Blob>('/api/accounts/export', {
+  exportAccounts: (accountIdsOrTokens: string[], format: 'json' | 'zip' | 'cpa' | 'sub2api' | 'agent_identity' = 'json') =>
+    apiClient.post<{ access_tokens: string[]; format: 'json' | 'zip' | 'cpa' | 'sub2api' | 'agent_identity' }, Blob>('/api/accounts/export', {
       access_tokens: Array.from(new Set(accountIdsOrTokens.map(resolveToken).filter(Boolean))),
       format,
     }, {

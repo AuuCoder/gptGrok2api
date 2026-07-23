@@ -120,6 +120,7 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
         children: [
           { key: 'selected_sub2api', label: 'Sub2API 格式 (.json)' },
           { key: 'selected_cpa', label: 'CPA 格式 (.zip)' },
+          { key: 'selected_agent_identity', label: 'Agent Identity (.zip)' },
         ],
       },
     ],
@@ -131,6 +132,7 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
         children: [
           { key: 'all_sub2api', label: 'Sub2API 格式 (.json)' },
           { key: 'all_cpa', label: 'CPA 格式 (.zip)' },
+          { key: 'all_agent_identity', label: 'Agent Identity (.zip)' },
         ],
       },
     ],
@@ -216,7 +218,7 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
   }
 
   async function handleExportAction(key: string) {
-    const match = key.match(/^(selected|all)_(sub2api|cpa)$/)
+    const match = key.match(/^(selected|all)_(sub2api|cpa|agent_identity)$/)
     if (!match) return
     await options.exportAccounts(match[1] as AccountExportScope, match[2] as AccountExportFormat)
   }

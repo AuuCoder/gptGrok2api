@@ -28,6 +28,7 @@ config: dict[str, Any] = {
     "threads": 1,
     "target": "grok",
     "grok": {
+        "signup_flow": "xconsole",
         "max_mail_retries": 3,
         "provider": "yescaptcha",
         "api_key": "",
@@ -206,6 +207,7 @@ def _register_once(
 
         given_name, family_name = _random_name()
         password = _random_password()
+        client.validate_password(email, password)
         turnstile_token = client.solve_turnstile()
         draft = {
             "email": email,

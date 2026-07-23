@@ -12,7 +12,7 @@ Environment=HOME=__RUN_HOME__
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PYTHONUNBUFFERED=1
 Environment=TURNSTILE_HEADLESS=0
-Environment=TURNSTILE_CONCURRENCY=2
+Environment=TURNSTILE_CONCURRENCY=0
 ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" __APP_DIR__/captcha-solver/.venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8877
 Restart=on-failure
 RestartSec=3

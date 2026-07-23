@@ -23,7 +23,12 @@ from services.json_file import read_json_object
 from services.openai_checkout_service import CheckoutSessionError, openai_checkout_service
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
-from services.sub2api_service import normalize_sync_config, sub2api_config, sync_openai_account
+from services.sub2api_service import (
+    ensure_openai_agent_identity,
+    normalize_sync_config,
+    sub2api_config,
+    sync_openai_account,
+)
 from utils.timezone import TIME_FORMAT, beijing_now_str
 
 base_dir = Path(__file__).resolve().parent
@@ -64,13 +69,16 @@ config = {
         "enabled": False,
         "pool_id": "",
     },
+    "agent_identity_archive": {
+        "enabled": True,
+    },
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = read_json_object(register_config_file, name="register.json")
     config.update({
         key: saved_config[key]
-        for key in ("mail", "proxy", "total", "threads", "checkout", "sub2api_sync", "cpa_sync")
+        for key in ("mail", "proxy", "total", "threads", "checkout", "sub2api_sync", "cpa_sync", "agent_identity_archive")
         if key in saved_config
     })
 except Exception:
@@ -3054,8 +3062,29 @@ def worker(index: int) -> dict:
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
+        archive_settings = config.get("agent_identity_archive")
+        archive_enabled = not isinstance(archive_settings, dict) or _truthy(
+            archive_settings.get("enabled"), True
+        )
         credential_account = _sync_registered_account_to_sub2api(index, result, registrar)
         _sync_registered_account_to_cpa(index, result, registrar, credential_account)
+        if archive_enabled:
+            try:
+                auth_json = ensure_openai_agent_identity(result)
+                identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
+                identity = identity if isinstance(identity, dict) else {}
+                archive_update: dict[str, Any] = {
+                    "agent_identity_status": "ready",
+                    "agent_runtime_id": str(identity.get("agent_runtime_id") or ""),
+                    "agent_identity_archived_at": datetime.now(timezone.utc).isoformat(),
+                    "agent_identity_error": None,
+                }
+                result.update(archive_update)
+                account_service.update_account(access_token, archive_update, quiet=True)
+                step(index, "Agent Identity 已独立归档", "green")
+            except Exception as error:
+                safe_error = str(error or "Agent Identity archive failed")[:300]
+                step(index, f"Agent Identity 暂未归档，账号注册结果已保留: {safe_error}", "yellow")
         checkout_settings = _checkout_config()
         if checkout_settings["enabled"]:
             checkout_channel = checkout_settings["channel"]

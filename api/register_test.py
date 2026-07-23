@@ -38,7 +38,11 @@ class RegisterGrokAccountsApiTest(unittest.TestCase):
             register_api.register_service,
             "grok_accounts_view",
             return_value=view,
-        ) as list_accounts:
+        ) as list_accounts, patch.object(
+            register_api.register_service,
+            "grok_probe_scheduler_status",
+            return_value={"enabled": False, "running": False, "next_run_at": ""},
+        ):
             response = self.client.get(
                 "/api/register/grok/accounts",
                 params={
@@ -62,9 +66,23 @@ class RegisterGrokAccountsApiTest(unittest.TestCase):
                 "summary": {"total": 8, "synced": 3},
                 "runtime_available": True,
                 "runtime_error": "",
+                "probe_scheduler": {"enabled": False, "running": False, "next_run_at": ""},
             },
         )
         list_accounts.assert_called_once_with(keyword="example", status="active")
+
+    def test_grok_probe_polling_toggle_uses_persistent_service_setting(self) -> None:
+        status = {"enabled": True, "running": False, "next_run_at": "2030-01-01T00:00:00+00:00"}
+        with patch.object(register_api, "require_admin"), patch.object(
+            register_api.register_service,
+            "set_grok_probe_scheduler_enabled",
+            return_value=status,
+        ) as toggle:
+            response = self.client.post("/api/register/grok/probe-polling", json={"enabled": True})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"probe_scheduler": status})
+        toggle.assert_called_once_with(True)
 
     def test_stop_checkout_retries_uses_dedicated_service_action(self) -> None:
         response_payload = {"enabled": False, "checkout_tasks": [{"status": "cancelled"}]}

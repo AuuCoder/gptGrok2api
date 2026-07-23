@@ -31,11 +31,13 @@ from services.cpa_service import cpa_config, cpa_import_service, list_remote_fil
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
 from services.sub2api_service import (
     build_openai_oauth_export_account,
+    ensure_openai_agent_identity,
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
     sub2api_config,
     sub2api_import_service,
 )
+from services.openai_agent_identity_store import openai_agent_identity_store
 
 
 
@@ -71,7 +73,7 @@ class AccountRefreshRequest(BaseModel):
 
 class AccountExportRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
-    format: Literal["json", "zip", "cpa", "sub2api"] = "json"
+    format: Literal["json", "zip", "cpa", "sub2api", "agent_identity"] = "json"
 
 
 class AccountUpdateRequest(BaseModel):
@@ -748,6 +750,64 @@ def create_router() -> APIRouter:
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         access_tokens = _unique_tokens(body.access_tokens)
+        timestamp = _download_timestamp()
+
+        if body.format == "agent_identity":
+            selected = set(access_tokens)
+            accounts = [
+                account
+                for account in account_service.list_accounts()
+                if not selected or _account_payload_token(account) in selected
+            ]
+            auth_items: list[dict[str, Any]] = []
+            errors: list[str] = []
+            for account in accounts:
+                try:
+                    auth_items.append(ensure_openai_agent_identity(account))
+                except Exception as exc:
+                    label = _clean_text(account.get("email")) or "unknown account"
+                    errors.append(f"{label}: {str(exc)[:200]}")
+            if not auth_items:
+                detail = "；".join(errors[:3]) or "没有可导出的 Agent Identity"
+                raise HTTPException(status_code=400, detail={"error": detail})
+            if len(auth_items) == 1:
+                return Response(
+                    json.dumps(auth_items[0], ensure_ascii=False, indent=2) + "\n",
+                    media_type="application/json",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Content-Disposition": 'attachment; filename="auth.json"',
+                    },
+                )
+            archive = io.BytesIO()
+            used_names: set[str] = set()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+                for index, auth_json in enumerate(auth_items, start=1):
+                    identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
+                    identity = identity if isinstance(identity, dict) else {}
+                    base_name = _safe_export_name(
+                        _clean_text(identity.get("email")),
+                        f"account-{index}",
+                    )
+                    name = base_name
+                    suffix = 2
+                    while name in used_names:
+                        name = f"{base_name}-{suffix}"
+                        suffix += 1
+                    used_names.add(name)
+                    bundle.writestr(
+                        f"{name}/auth.json",
+                        json.dumps(auth_json, ensure_ascii=False, indent=2) + "\n",
+                    )
+            return Response(
+                archive.getvalue(),
+                media_type="application/zip",
+                headers={
+                    "Cache-Control": "no-store",
+                    "Content-Disposition": f'attachment; filename="openai-agent-identities-{timestamp}.zip"',
+                },
+            )
+
         items = account_service.build_export_items(access_tokens)
         if not items:
             raise HTTPException(
@@ -755,7 +815,6 @@ def create_router() -> APIRouter:
                 detail={"error": "没有可导出的完整账号，需要同时有 access_token、refresh_token 和 id_token"},
             )
 
-        timestamp = _download_timestamp()
         if body.format in {"zip", "cpa"}:
             content = _account_zip_bytes(items)
             return Response(
@@ -782,6 +841,12 @@ def create_router() -> APIRouter:
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="codex-accounts-{timestamp}.json"'},
         )
+
+    @router.get("/api/accounts/agent-identities")
+    async def list_agent_identities(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        items = openai_agent_identity_store.summary()
+        return {"total": len(items), "items": items}
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):

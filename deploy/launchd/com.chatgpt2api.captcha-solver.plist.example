@@ -29,7 +29,7 @@
     <key>TURNSTILE_HIDE_WINDOW</key>
     <string>1</string>
     <key>TURNSTILE_CONCURRENCY</key>
-    <string>2</string>
+    <string>0</string>
   </dict>
 
   <key>RunAtLoad</key>

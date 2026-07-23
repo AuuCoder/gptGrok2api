@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 - 2026-07-23
+
++ [新增] OpenAI 账号存活追踪、跨进程 scheduler lease 和手动探测接口；网络或 Token 异常仅记录当次失败，不直接判定账号停用。
++ [新增] Outlook Token 邮箱池改用 SQLite lease 原子预占，支持多进程注册与旧 JSON 状态自动迁移，避免并发 worker 重复领取或覆盖新状态。
++ [新增] Codex Agent Identity 独立加密归档，支持单账号 `auth.json` 和批量 ZIP 导出，私钥不写入普通账号列表。
++ [修复] Grok 默认切换到已验证的 xconsole 注册链路，对齐无 Castle 发码、`ValidatePassword`、`tos=$undefined` 和创建阶段空 Castle；真实 OAuth 探测可获得 100 万 Token 初始额度，同时保留旧链路回退。
++ [优化] Grok Device Code OAuth 优先复用已有 SSO，失效时再回退邮箱密码；增加可选 Authorization Code + PKCE 对照授权和 402 权益延迟复检。
++ [优化] 本地 Turnstile 不再受 solver 内部固定 2 线程隐藏阀限制；注册页“注册解题并发”成为唯一控制项，默认为 2，设为 0 可取消共享并发上限。
+
 ## 1.0.9 - 2026-07-22
 
 + [新增] GPT 对接 Sub2API 支持 Codex Agent Identity 新模式；兼容新版 JWT claims、Cloudflare WARP 重试，并在上游不支持 Agent Identity 时自动降级为 Codex Session 导入。

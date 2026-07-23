@@ -5,8 +5,11 @@ import imaplib
 import random
 import re
 import os
+import secrets
+import sqlite3
 import string
 import time
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
@@ -36,6 +39,112 @@ OUTLOOK_RETRYABLE_STATES = {"failed"}
 OUTLOOK_INVALID_STATES = {"login_required", "token_invalid"}
 OUTLOOK_CREDENTIAL_FATAL_STATES = OUTLOOK_INVALID_STATES
 OUTLOOK_REFRESHED_CREDENTIAL_RESET_STATES = OUTLOOK_RETRYABLE_STATES | OUTLOOK_INVALID_STATES
+
+
+def _outlook_token_state_db_file():
+    # Derive this from the legacy path so tests and custom DATA_DIR deployments
+    # that override OUTLOOK_TOKEN_USED_FILE keep their state isolated.
+    return OUTLOOK_TOKEN_USED_FILE.with_suffix(".db")
+
+
+def _outlook_state_connection() -> sqlite3.Connection:
+    path = _outlook_token_state_db_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=15)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout=15000")
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            connection.close()
+            raise
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS mailbox_states (
+            email TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            lease_token TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS mailbox_states_state_idx
+            ON mailbox_states(state, updated_at);
+        CREATE TABLE IF NOT EXISTS mailbox_state_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return connection
+
+
+def _legacy_outlook_token_state() -> dict[str, dict[str, Any]]:
+    data = read_json_file(
+        OUTLOOK_TOKEN_USED_FILE,
+        name="outlook_token_used.json",
+        default_factory=dict,
+        expected_types=(dict, list),
+    )
+    state: dict[str, dict[str, Any]] = {}
+    if isinstance(data, list):
+        for item in data:
+            key = str(item).strip().lower()
+            if key:
+                state[key] = {"state": "used", "reason": "", "updated_at": ""}
+    elif isinstance(data, dict):
+        for key, value in data.items():
+            email = str(key).strip().lower()
+            if not email:
+                continue
+            if isinstance(value, dict):
+                state[email] = {
+                    "state": str(value.get("state") or "used").strip() or "used",
+                    "reason": str(value.get("reason") or ""),
+                    "updated_at": str(value.get("updated_at") or ""),
+                }
+            else:
+                state[email] = {
+                    "state": str(value or "used").strip() or "used",
+                    "reason": "",
+                    "updated_at": "",
+                }
+    return state
+
+
+def _ensure_outlook_state_migrated(connection: sqlite3.Connection) -> None:
+    migrated = connection.execute(
+        "SELECT value FROM mailbox_state_meta WHERE key = 'legacy_json_imported'"
+    ).fetchone()
+    if migrated is not None:
+        return
+    legacy = _legacy_outlook_token_state()
+    now = datetime.now(timezone.utc).isoformat()
+    connection.execute("BEGIN IMMEDIATE")
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO mailbox_states(email, state, reason, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        [
+            (
+                email,
+                str(entry.get("state") or "used"),
+                str(entry.get("reason") or ""),
+                str(entry.get("updated_at") or now),
+            )
+            for email, entry in legacy.items()
+        ],
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO mailbox_state_meta(key, value) VALUES('legacy_json_imported', ?)",
+        (now,),
+    )
+    connection.commit()
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -72,42 +181,90 @@ def _record_ddg_alias(address: str) -> None:
 
 
 def _load_outlook_token_state() -> dict[str, dict[str, Any]]:
-    """读取邮箱池状态文件，返回 {email_lower: {state, reason, updated_at}}。
+    """Return the cross-process mailbox state snapshot.
 
-    兼容旧格式：纯字符串列表（历史的“已用邮箱”）会被解释为 used。
+    The legacy JSON file is imported once into SQLite on first access.
     """
-    data = read_json_file(
-        OUTLOOK_TOKEN_USED_FILE,
-        name="outlook_token_used.json",
-        default_factory=dict,
-        expected_types=(dict, list),
-    )
-    state: dict[str, dict[str, Any]] = {}
-    if isinstance(data, list):
-        for item in data:
-            key = str(item).strip().lower()
-            if key:
-                state[key] = {"state": "used", "reason": "", "updated_at": ""}
-    elif isinstance(data, dict):
-        for key, value in data.items():
-            email = str(key).strip().lower()
-            if not email:
-                continue
-            if isinstance(value, dict):
-                state[email] = {
-                    "state": str(value.get("state") or "used").strip() or "used",
-                    "reason": str(value.get("reason") or ""),
-                    "updated_at": str(value.get("updated_at") or ""),
-                }
-            else:
-                state[email] = {"state": str(value or "used").strip() or "used", "reason": "", "updated_at": ""}
-    return state
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        rows = connection.execute(
+            "SELECT email, state, reason, updated_at, lease_token FROM mailbox_states"
+        ).fetchall()
+    return {
+        str(row["email"]): {
+            "state": str(row["state"]),
+            "reason": str(row["reason"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "lease_token": str(row["lease_token"] or ""),
+        }
+        for row in rows
+    }
 
 
 def _save_outlook_token_state(state: dict[str, dict[str, Any]]) -> None:
-    OUTLOOK_TOKEN_USED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ordered = {key: state[key] for key in sorted(state)}
-    write_json_file(OUTLOOK_TOKEN_USED_FILE, ordered)
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM mailbox_states")
+        connection.executemany(
+            """
+            INSERT INTO mailbox_states(email, state, reason, updated_at, lease_token)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(email).strip().lower(),
+                    str(entry.get("state") or "used"),
+                    str(entry.get("reason") or ""),
+                    str(entry.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+                    str(entry.get("lease_token") or ""),
+                )
+                for email, entry in state.items()
+                if str(email).strip()
+            ],
+        )
+        connection.commit()
+
+
+def _claim_outlook_credential(pool: list[dict[str, str]]) -> tuple[dict[str, str] | None, str]:
+    """Atomically reserve one available credential across worker processes."""
+    now = datetime.now(timezone.utc)
+    lease_token = secrets.token_urlsafe(24)
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT email, state, reason, updated_at, lease_token FROM mailbox_states"
+        ).fetchall()
+        store = {
+            str(row["email"]): {
+                "state": str(row["state"]),
+                "reason": str(row["reason"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+                "lease_token": str(row["lease_token"] or ""),
+            }
+            for row in rows
+        }
+        credential = next(
+            (item for item in pool if _outlook_credential_available(store, item)),
+            None,
+        )
+        if credential is None:
+            connection.rollback()
+            return None, ""
+        email = str(credential.get("email") or "").strip().lower()
+        connection.execute(
+            """
+            INSERT INTO mailbox_states(email, state, reason, updated_at, lease_token)
+            VALUES (?, 'in_use', '', ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                state = 'in_use', reason = '', updated_at = excluded.updated_at,
+                lease_token = excluded.lease_token
+            """,
+            (email, now.isoformat(), lease_token),
+        )
+        connection.commit()
+    return credential, lease_token
 
 
 def _outlook_entry_available(entry: dict[str, Any] | None) -> bool:
@@ -153,27 +310,74 @@ def _outlook_credential_available(store: dict[str, dict[str, Any]], credential: 
     return state not in OUTLOOK_CREDENTIAL_FATAL_STATES
 
 
-def _set_outlook_token_state(address: str, state: str, reason: str = "") -> None:
+def _set_outlook_token_state(
+    address: str,
+    state: str,
+    reason: str = "",
+    *,
+    lease_token: str = "",
+) -> bool:
     target = str(address or "").strip().lower()
     if not target:
-        return
-    with _outlook_token_state_lock:
-        store = _load_outlook_token_state()
-        store[target] = {"state": str(state), "reason": str(reason or ""), "updated_at": datetime.now(timezone.utc).isoformat()}
-        _save_outlook_token_state(store)
+        return False
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        if lease_token:
+            cursor = connection.execute(
+                """
+                UPDATE mailbox_states
+                SET state = ?, reason = ?, updated_at = ?, lease_token = ''
+                WHERE email = ? AND lease_token = ?
+                """,
+                (
+                    str(state),
+                    str(reason or ""),
+                    datetime.now(timezone.utc).isoformat(),
+                    target,
+                    lease_token,
+                ),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO mailbox_states(email, state, reason, updated_at, lease_token)
+                VALUES (?, ?, ?, ?, '')
+                ON CONFLICT(email) DO UPDATE SET
+                    state = excluded.state, reason = excluded.reason,
+                    updated_at = excluded.updated_at, lease_token = ''
+                """,
+                (
+                    target,
+                    str(state),
+                    str(reason or ""),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        connection.commit()
+        return cursor.rowcount == 1
 
 
-def _release_outlook_token_state(address: str) -> None:
+def _release_outlook_token_state(address: str, *, lease_token: str = "") -> bool:
     """把 in_use 释放回未使用（仅当当前确实是 in_use 时）。"""
     target = str(address or "").strip().lower()
     if not target:
-        return
-    with _outlook_token_state_lock:
-        store = _load_outlook_token_state()
-        entry = store.get(target)
-        if isinstance(entry, dict) and str(entry.get("state") or "") == "in_use":
-            store.pop(target, None)
-            _save_outlook_token_state(store)
+        return False
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        if lease_token:
+            cursor = connection.execute(
+                "DELETE FROM mailbox_states WHERE email = ? AND state = 'in_use' AND lease_token = ?",
+                (target, lease_token),
+            )
+        else:
+            cursor = connection.execute(
+                "DELETE FROM mailbox_states WHERE email = ? AND state = 'in_use'",
+                (target,),
+            )
+        connection.commit()
+        return cursor.rowcount == 1
 
 
 def clear_outlook_token_states(addresses: list[str] | set[str], states: set[str] | None = None) -> int:
@@ -186,21 +390,19 @@ def clear_outlook_token_states(addresses: list[str] | set[str], states: set[str]
     targets.discard("")
     if not targets:
         return 0
-    with _outlook_token_state_lock:
-        store = _load_outlook_token_state()
-        remove: set[str] = set()
-        for key in targets:
-            entry = store.get(key)
-            if not isinstance(entry, dict):
-                continue
-            current = str(entry.get("state") or "")
-            if states is None or current in states:
-                remove.add(key)
-        for key in remove:
-            store.pop(key, None)
-        if remove:
-            _save_outlook_token_state(store)
-        return len(remove)
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" for _ in targets)
+        params: list[str] = list(targets)
+        sql = f"DELETE FROM mailbox_states WHERE email IN ({placeholders})"
+        if states:
+            state_placeholders = ",".join("?" for _ in states)
+            sql += f" AND state IN ({state_placeholders})"
+            params.extend(states)
+        cursor = connection.execute(sql, params)
+        connection.commit()
+        return cursor.rowcount
 
 
 def reset_outlook_token_pool_state(scope: str = "all") -> int:
@@ -211,28 +413,28 @@ def reset_outlook_token_pool_state(scope: str = "all") -> int:
     scope=invalid 仅释放 login_required/token_invalid，用于重新授权或重新导入 refresh_token 后手动恢复。
     返回被清除的条目数。
     """
-    with _outlook_token_state_lock:
-        store = _load_outlook_token_state()
-        if not store:
-            return 0
-        normalized = str(scope or "all").strip().lower()
-        if normalized in {"failed", "retryable"}:
-            target_states = OUTLOOK_RETRYABLE_STATES | OUTLOOK_BUSY_STATES
-        elif normalized in {"invalid", "reauth"}:
-            target_states = OUTLOOK_INVALID_STATES
-        elif normalized in {"busy", "in_use"}:
-            target_states = OUTLOOK_BUSY_STATES
-        else:
-            target_states = set()
+    normalized = str(scope or "all").strip().lower()
+    if normalized in {"failed", "retryable"}:
+        target_states = OUTLOOK_RETRYABLE_STATES | OUTLOOK_BUSY_STATES
+    elif normalized in {"invalid", "reauth"}:
+        target_states = OUTLOOK_INVALID_STATES
+    elif normalized in {"busy", "in_use"}:
+        target_states = OUTLOOK_BUSY_STATES
+    else:
+        target_states = set()
+    with closing(_outlook_state_connection()) as connection:
+        _ensure_outlook_state_migrated(connection)
+        connection.execute("BEGIN IMMEDIATE")
         if target_states:
-            remove = {key for key, value in store.items() if str(value.get("state") or "") in target_states}
-            for key in remove:
-                store.pop(key, None)
-            _save_outlook_token_state(store)
-            return len(remove)
-        count = len(store)
-        _save_outlook_token_state({})
-        return count
+            placeholders = ",".join("?" for _ in target_states)
+            cursor = connection.execute(
+                f"DELETE FROM mailbox_states WHERE state IN ({placeholders})",
+                list(target_states),
+            )
+        else:
+            cursor = connection.execute("DELETE FROM mailbox_states")
+        connection.commit()
+        return cursor.rowcount
 
 
 def prune_outlook_unused_credentials(credentials: list[dict[str, str]], entry: dict | None = None) -> tuple[list[dict[str, str]], int]:
@@ -2391,13 +2593,9 @@ class OutlookTokenProvider(BaseMailProvider):
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         if not self.pool:
             raise RuntimeError("OutlookToken 邮箱池为空，请在邮箱配置中导入 email----password----client_id----refresh_token")
-        with _outlook_token_state_lock:
-            store = _load_outlook_token_state()
-            credential = next((item for item in self.pool if _outlook_credential_available(store, item)), None)
-            if credential is None:
-                raise RuntimeError(f"[{self.label}] OutlookToken 邮箱池暂无可用邮箱（共 {len(self.pool)} 个，已用尽或全部占用/失效），请导入新邮箱或重置池状态")
-            store[credential["email"].strip().lower()] = {"state": "in_use", "reason": "", "updated_at": datetime.now(timezone.utc).isoformat()}
-            _save_outlook_token_state(store)
+        credential, lease_token = _claim_outlook_credential(self.pool)
+        if credential is None:
+            raise RuntimeError(f"[{self.label}] OutlookToken 邮箱池暂无可用邮箱（共 {len(self.pool)} 个，已用尽或全部占用/失效），请导入新邮箱或重置池状态")
         return {
             "provider": self.name,
             "provider_ref": self.provider_ref,
@@ -2408,6 +2606,7 @@ class OutlookTokenProvider(BaseMailProvider):
             "password": credential.get("password", ""),
             "client_id": credential["client_id"],
             "refresh_token": credential["refresh_token"],
+            "_outlook_lease_token": lease_token,
         }
 
     def _read_graph(self, access_token: str) -> list[dict[str, Any]]:
@@ -2871,30 +3070,37 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     if not address:
         return
     if success:
-        _set_outlook_token_state(address, "used")
+        _set_outlook_token_state(
+            address,
+            "used",
+            lease_token=str(mailbox.get("_outlook_lease_token") or ""),
+        )
         return
     reason = str(error or "").strip()
     if isinstance(error, OutlookTokenRateLimitError) or "AADSTS90055" in reason or "HTTP 429" in reason or "Microsoft 限流" in reason:
-        _set_outlook_token_state(address, "failed", reason[:300])
+        _set_outlook_token_state(address, "failed", reason[:300], lease_token=str(mailbox.get("_outlook_lease_token") or ""))
     elif isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
-        _set_outlook_token_state(address, "token_invalid", reason[:300])
+        _set_outlook_token_state(address, "token_invalid", reason[:300], lease_token=str(mailbox.get("_outlook_lease_token") or ""))
         login_email = str(mailbox.get("login_email") or mailbox.get("alias_of") or "").strip()
         if login_email and login_email.lower() != address.lower():
             _set_outlook_token_state(login_email, "token_invalid", reason[:300])
     elif "登录流" in reason or "login flow" in reason or "login_required" in reason:
-        _set_outlook_token_state(address, "login_required", reason[:300])
+        _set_outlook_token_state(address, "login_required", reason[:300], lease_token=str(mailbox.get("_outlook_lease_token") or ""))
         login_email = str(mailbox.get("login_email") or mailbox.get("alias_of") or "").strip()
         if login_email and login_email.lower() != address.lower():
             _set_outlook_token_state(login_email, "login_required", reason[:300])
     else:
-        _set_outlook_token_state(address, "failed", reason[:300])
+        _set_outlook_token_state(address, "failed", reason[:300], lease_token=str(mailbox.get("_outlook_lease_token") or ""))
 
 
 def release_mailbox(mailbox: dict) -> None:
     """把 outlook_token 邮箱从 in_use 释放回未使用（用于流程主动放弃且未消费验证码时）。"""
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
-    _release_outlook_token_state(str(mailbox.get("address") or ""))
+    _release_outlook_token_state(
+        str(mailbox.get("address") or ""),
+        lease_token=str(mailbox.get("_outlook_lease_token") or ""),
+    )
 
 
 def get_existing_mailbox(mail_config: dict, email: str) -> dict:

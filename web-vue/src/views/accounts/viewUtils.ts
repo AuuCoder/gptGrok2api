@@ -729,11 +729,15 @@ export function accountStatusDetailText(
 }
 
 export function accountDetailItems(item: Account) {
+  const survival = item.survival_status
+    ? `${item.survival_status}${item.survival_observed_seconds ? ` · ${formatDuration(item.survival_observed_seconds)}` : ''}`
+    : '-'
   return [
     { label: '创建时间', value: accountCreatedText(item) },
     { label: '恢复时间', value: accountRestoreText(item) },
     { label: '图片额度', value: accountQuotaText(item) },
     { label: '成功 / 失败', value: `${item.success_count || 0} / ${item.failure_count || 0}` },
+    { label: '存活确认', value: survival },
   ]
 }
 

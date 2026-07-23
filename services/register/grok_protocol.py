@@ -34,6 +34,10 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+REFERENCE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
 DEFAULT_ROUTER_STATE_TREE = [
     "",
     {
@@ -381,11 +385,18 @@ def decode_grpc_web_response(payload: bytes, headers: Any = None) -> GrpcWebResu
 
 
 def create_email_validation_request(email: str, castle_request_token: str) -> bytes:
-    return protobuf_string(1, email) + protobuf_string(3, castle_request_token)
+    payload = protobuf_string(1, email)
+    if castle_request_token:
+        payload += protobuf_string(3, castle_request_token)
+    return payload
 
 
 def verify_email_validation_request(email: str, code: str) -> bytes:
     return protobuf_string(1, email) + protobuf_string(2, code)
+
+
+def validate_password_request(email: str, password: str) -> bytes:
+    return protobuf_string(4, email) + protobuf_string(5, password)
 
 
 def parse_verification_token(message: bytes) -> str:
@@ -844,7 +855,8 @@ class TurnstileSolver:
                 0,
                 min(300, int(60 if queue_timeout_raw is None else queue_timeout_raw)),
             )
-            concurrency = max(1, min(16, int(self.config.get("local_concurrency") or 2)))
+            concurrency_raw = self.config.get("local_concurrency")
+            concurrency = max(0, min(64, int(2 if concurrency_raw is None else concurrency_raw)))
             proxy = str(self.config.get("proxy") or "").strip()
             deadline = time.monotonic() + self.timeout
             last_error = ""
@@ -972,14 +984,20 @@ class GrokProtocolClient:
         log: Callable[[str], None] | None = None,
     ):
         self.config = dict(config or {})
+        flow = str(self.config.get("signup_flow") or "legacy").strip().lower()
+        self.signup_flow = flow if flow in {"legacy", "xconsole"} else "legacy"
         self.base_url = str(self.config.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
-        self.signup_url = urljoin(f"{self.base_url}/", DEFAULT_SIGNUP_PATH.lstrip("/"))
+        signup_path = str(self.config.get("signup_path") or DEFAULT_SIGNUP_PATH).strip()
+        self.signup_url = urljoin(f"{self.base_url}/", signup_path.lstrip("/"))
         self.proxy = str(proxy or "").strip()
         self.request_timeout = max(1.0, float(self.config.get("request_timeout") or 30))
         self.castle_timeout = max(1.0, float(self.config.get("castle_timeout") or 20))
-        self.user_agent = str(self.config.get("user_agent") or DEFAULT_USER_AGENT).strip()
+        default_user_agent = REFERENCE_USER_AGENT if self.signup_flow == "xconsole" else DEFAULT_USER_AGENT
+        self.user_agent = str(self.config.get("user_agent") or default_user_agent).strip()
         self.log = log
-        self.session = requests.Session(impersonate="chrome120", trust_env=False)
+        default_impersonate = "chrome146" if self.signup_flow == "xconsole" else "chrome120"
+        impersonate = str(self.config.get("impersonate") or default_impersonate).strip()
+        self.session = requests.Session(impersonate=impersonate, trust_env=False)
         self.session.headers.update(
             {
                 "User-Agent": self.user_agent,
@@ -1006,6 +1024,7 @@ class GrokProtocolClient:
         return self.session.request(method.upper(), url, **kwargs)
 
     def _get_landing(self) -> str:
+        reference_flow = self.signup_flow == "xconsole"
         response = self._request(
             "GET",
             self.signup_url,
@@ -1014,8 +1033,9 @@ class GrokProtocolClient:
                 "Cache-Control": "no-cache",
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-Site": "same-site" if reference_flow else "none",
                 "Upgrade-Insecure-Requests": "1",
+                **({"Referer": "https://console.x.ai/"} if reference_flow else {}),
             },
         )
         text = str(response.text or "")
@@ -1081,6 +1101,8 @@ class GrokProtocolClient:
         cache_key = json.dumps(
             {
                 "base_url": self.base_url,
+                "signup_url": self.signup_url,
+                "signup_flow": self.signup_flow,
                 "proxy": self.proxy,
                 "action_id": action_id,
                 "castle_sdk_url": castle_sdk_url,
@@ -1193,13 +1215,21 @@ class GrokProtocolClient:
         return decode_grpc_web_response(bytes(response.content or b""), response.headers)
 
     def send_email_validation_code(self, email: str) -> None:
-        castle_token = self.create_castle_token()
+        castle_token = "" if self.signup_flow == "xconsole" else self.create_castle_token()
         self._grpc_post(
             "/auth_mgmt.AuthManagement/CreateEmailValidationCode",
             create_email_validation_request(email, castle_token),
         )
 
     send_email_code = send_email_validation_code
+
+    def validate_password(self, email: str, password: str) -> None:
+        if self.signup_flow != "xconsole":
+            return
+        self._grpc_post(
+            "/auth_mgmt.AuthManagement/ValidatePassword",
+            validate_password_request(email, password),
+        )
 
     def verify_email_validation_code(self, email: str, code: str) -> str:
         result = self._grpc_post(
@@ -1501,9 +1531,11 @@ class GrokProtocolClient:
         value: Any = None
         redirect_url = ""
         exchange_result = SessionExchangeResult("", "", 0, 0, "not_started")
-        self._prewarm_grok_session()
+        if self.signup_flow != "xconsole":
+            self._prewarm_grok_session()
         for attempt in range(2):
-            castle_token = self.create_castle_token()
+            castle_token = "" if self.signup_flow == "xconsole" else self.create_castle_token()
+            tos_version: int | str = "$undefined" if self.signup_flow == "xconsole" else 1
             payload = {
                 "emailValidationCode": code,
                 "createUserAndSessionRequest": {
@@ -1511,7 +1543,7 @@ class GrokProtocolClient:
                     "givenName": given_name,
                     "familyName": family_name,
                     "clearTextPassword": password,
-                    "tosAcceptedVersion": 1,
+                    "tosAcceptedVersion": tos_version,
                 },
                 "turnstileToken": turnstile_token,
                 "conversionId": str(uuid.uuid4()),

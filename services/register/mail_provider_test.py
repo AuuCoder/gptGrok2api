@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
 import unittest
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qsl, urlsplit
@@ -654,6 +658,77 @@ class OutlookTokenProviderTest(unittest.TestCase):
     def _provider(self) -> mail_provider.OutlookTokenProvider:
         with patch.object(mail_provider, "_create_session", return_value=MagicMock()):
             return mail_provider.OutlookTokenProvider(dict(self.entry), dict(self.conf))
+
+    def test_legacy_json_state_is_imported_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "outlook_token_used.json"
+            state_file.write_text(json.dumps(["used@example.test"]), encoding="utf-8")
+            with patch.object(mail_provider, "OUTLOOK_TOKEN_USED_FILE", state_file):
+                first = mail_provider._load_outlook_token_state()
+                self.assertEqual(first["used@example.test"]["state"], "used")
+                self.assertTrue(state_file.with_suffix(".db").exists())
+
+                state_file.write_text(json.dumps(["late@example.test"]), encoding="utf-8")
+                second = mail_provider._load_outlook_token_state()
+
+            self.assertIn("used@example.test", second)
+            self.assertNotIn("late@example.test", second)
+
+    def test_sqlite_claims_are_atomic_and_lease_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "outlook_token_used.json"
+            entry = dict(self.entry)
+            entry["mailboxes"] = "\n".join(
+                [
+                    "one@example.test----pass----client----refresh-one",
+                    "two@example.test----pass----client----refresh-two",
+                ]
+            )
+            with patch.object(mail_provider, "OUTLOOK_TOKEN_USED_FILE", state_file):
+                first_provider = mail_provider.OutlookTokenProvider(entry, dict(self.conf))
+                second_provider = mail_provider.OutlookTokenProvider(entry, dict(self.conf))
+                try:
+                    first = first_provider.create_mailbox()
+                    second = second_provider.create_mailbox()
+                    self.assertNotEqual(first["address"], second["address"])
+                    self.assertNotEqual(first["_outlook_lease_token"], second["_outlook_lease_token"])
+
+                    mail_provider.release_mailbox(first)
+                    replacement = first_provider.create_mailbox()
+                    self.assertEqual(replacement["address"], first["address"])
+
+                    # A delayed worker holding the old lease must not overwrite
+                    # the replacement worker's reservation.
+                    mail_provider.mark_mailbox_result(first, success=True)
+                    snapshot = mail_provider._load_outlook_token_state()
+                    self.assertEqual(snapshot[first["address"]]["state"], "in_use")
+                    self.assertEqual(
+                        snapshot[first["address"]]["lease_token"],
+                        replacement["_outlook_lease_token"],
+                    )
+                finally:
+                    first_provider.close()
+                    second_provider.close()
+
+    def test_concurrent_sqlite_claims_do_not_duplicate_mailboxes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "outlook_token_used.json"
+            pool = [
+                {
+                    "email": f"worker-{index}@example.test",
+                    "password": "pass",
+                    "client_id": "client",
+                    "refresh_token": f"refresh-{index}",
+                }
+                for index in range(8)
+            ]
+            with patch.object(mail_provider, "OUTLOOK_TOKEN_USED_FILE", state_file):
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    claims = list(executor.map(lambda _: mail_provider._claim_outlook_credential(pool), range(8)))
+
+            addresses = [credential["email"] for credential, lease in claims if credential and lease]
+            self.assertEqual(len(addresses), 8)
+            self.assertEqual(len(set(addresses)), 8)
 
     def test_auto_mode_falls_back_to_imap_when_graph_scope_is_unavailable(self) -> None:
         provider = self._provider()

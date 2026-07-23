@@ -146,7 +146,7 @@ per-request proxy such as `http://127.0.0.1:40080` to
 `http://host.docker.internal:40080`, so it can still reach a proxy on the Mac.
 | `TURNSTILE_PROXY`       | unset   | Proxy URL for Turnstile browser             |
 | `TURNSTILE_GEOIP`       | unset   | `1` = align browser timezone/locale/WebGL to the proxy exit IP (shared by Turnstile + cloudflare + awswaf) |
-| `TURNSTILE_CONCURRENCY` | `2`     | Default simultaneous Turnstile browser attempts; Grok requests override it dynamically, including one reserved OAuth slot during immediate upload |
+| `TURNSTILE_CONCURRENCY` | `0`     | Maximum simultaneous Turnstile browser attempts; `0` disables the shared concurrency gate, and Grok requests can override it dynamically |
 | `RECAPTCHA_HEADLESS`    | `0`     | `1` = run reCAPTCHA headless                |
 | `RECAPTCHA_PROXY`       | unset   | Proxy URL for reCAPTCHA browser             |
 | `RECAPTCHA_GEOIP`       | unset   | `1` = same geo alignment for the reCAPTCHA browser |

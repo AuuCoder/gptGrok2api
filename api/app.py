@@ -36,6 +36,7 @@ from services.image_service import start_image_cleanup_scheduler
 from services.log_service import cleanup_old_logs, start_log_cleanup_scheduler
 from services.grok_runtime import grok_runtime
 from services.register_service import register_service
+from services.openai_survival_service import openai_survival_service
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.log import logger
 
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
             cleanup_thread = start_image_cleanup_scheduler(stop_event)
             log_cleanup_thread = start_log_cleanup_scheduler(stop_event)
             register_service.start_grok_probe_scheduler(stop_event)
+            openai_survival_thread = openai_survival_service.start_scheduler(stop_event)
             backup_service.start()
             config.cleanup_old_images()
             cleanup_old_logs()
@@ -88,6 +90,8 @@ def create_app() -> FastAPI:
                 cleanup_thread.join(timeout=1)
                 log_cleanup_thread.join(timeout=1)
                 register_service.stop_grok_probe_scheduler()
+                openai_survival_service.stop_scheduler()
+                openai_survival_thread.join(timeout=1)
                 try:
                     dashboard_metrics_service.flush()
                 except Exception as exc:

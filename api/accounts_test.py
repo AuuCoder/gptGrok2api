@@ -60,6 +60,21 @@ class AccountExportApiTest(unittest.TestCase):
             "last_refresh": "2029-01-01T00:00:00+00:00",
         }
 
+    @staticmethod
+    def _agent_identity(account_id: str, email: str) -> dict:
+        return {
+            "auth_mode": "agent_identity",
+            "agent_identity": {
+                "agent_runtime_id": f"runtime-{account_id}",
+                "agent_private_key": f"private-{account_id}",
+                "account_id": account_id,
+                "chatgpt_user_id": f"user-{account_id}",
+                "email": email,
+                "plan_type": "free",
+                "chatgpt_account_is_fedramp": False,
+            },
+        }
+
     def test_sub2api_export_uses_standard_account_envelope(self) -> None:
         with patch.object(accounts_api, "require_admin"), patch.object(
             accounts_api.account_service,
@@ -99,6 +114,78 @@ class AccountExportApiTest(unittest.TestCase):
             exported = json.loads(archive.read(archive.namelist()[0]))
         self.assertEqual(exported["type"], "codex")
         self.assertEqual(exported["access_token"], "access-token")
+
+    def test_single_agent_identity_export_is_auth_json(self) -> None:
+        auth_json = self._agent_identity("one", "one@example.test")
+        with patch.object(accounts_api, "require_admin"), patch.object(
+            accounts_api.account_service,
+            "list_accounts",
+            return_value=[self.item],
+        ), patch.object(
+            accounts_api,
+            "ensure_openai_agent_identity",
+            return_value=auth_json,
+        ):
+            response = self.client.post(
+                "/api/accounts/export",
+                json={"access_tokens": ["access-token"], "format": "agent_identity"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/json")
+        self.assertEqual(response.headers["content-disposition"], 'attachment; filename="auth.json"')
+        self.assertEqual(response.json(), auth_json)
+
+    def test_multiple_agent_identity_export_is_zip(self) -> None:
+        accounts = [
+            {**self.item, "access_token": "token-one", "email": "one@example.test"},
+            {**self.item, "access_token": "token-two", "email": "two@example.test"},
+        ]
+        identities = [
+            self._agent_identity("one", "one@example.test"),
+            self._agent_identity("two", "two@example.test"),
+        ]
+        with patch.object(accounts_api, "require_admin"), patch.object(
+            accounts_api.account_service,
+            "list_accounts",
+            return_value=accounts,
+        ), patch.object(
+            accounts_api,
+            "ensure_openai_agent_identity",
+            side_effect=identities,
+        ):
+            response = self.client.post(
+                "/api/accounts/export",
+                json={"access_tokens": [], "format": "agent_identity"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "application/zip")
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            self.assertEqual(archive.namelist(), [
+                "one-example.test/auth.json",
+                "two-example.test/auth.json",
+            ])
+            exported = [json.loads(archive.read(name)) for name in archive.namelist()]
+        self.assertEqual(exported, identities)
+
+    def test_agent_identity_list_does_not_include_private_keys(self) -> None:
+        summaries = [{
+            "account_id": "one",
+            "email": "one@example.test",
+            "agent_runtime_id": "runtime-one",
+            "updated_at": "2030-01-01T00:00:00+00:00",
+        }]
+        with patch.object(accounts_api, "require_admin"), patch.object(
+            accounts_api.openai_agent_identity_store,
+            "summary",
+            return_value=summaries,
+        ):
+            response = self.client.get("/api/accounts/agent-identities")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"total": 1, "items": summaries})
+        self.assertNotIn("agent_private_key", response.text)
 
 
 if __name__ == "__main__":

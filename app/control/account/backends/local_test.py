@@ -42,6 +42,28 @@ class LocalAccountRepositoryTokenPayloadTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(max_active, 1)
 
+    async def test_connection_lifecycles_are_serialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = LocalAccountRepository(Path(temp_dir) / "accounts.db")
+            active = 0
+            max_active = 0
+            guard = threading.Lock()
+
+            def hold_connection(_index: int) -> None:
+                nonlocal active, max_active
+                with repo._connection():
+                    with guard:
+                        active += 1
+                        max_active = max(max_active, active)
+                    time.sleep(0.01)
+                    with guard:
+                        active -= 1
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(hold_connection, range(8)))
+
+        self.assertEqual(max_active, 1)
+
     async def test_console_quota_keeps_source_and_reset_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = LocalAccountRepository(Path(temp_dir) / "accounts.db")

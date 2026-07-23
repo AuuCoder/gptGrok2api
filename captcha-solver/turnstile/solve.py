@@ -26,7 +26,7 @@ def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 16) -> in
     return max(minimum, min(maximum, value))
 
 
-_TURNSTILE_CONCURRENCY = _env_int("TURNSTILE_CONCURRENCY", 2)
+_TURNSTILE_CONCURRENCY = _env_int("TURNSTILE_CONCURRENCY", 0, minimum=0, maximum=64)
 _solve_slot_condition = asyncio.Condition()
 _active_solves = 0
 _TEMPLATE_PATH = Path(__file__).parent / "template.html"
@@ -38,7 +38,7 @@ def _concurrency_limit(value: int = None) -> int:
         requested = int(value) if value is not None else _TURNSTILE_CONCURRENCY
     except (TypeError, ValueError):
         requested = _TURNSTILE_CONCURRENCY
-    return max(1, min(16, requested))
+    return 0 if requested <= 0 else min(64, requested)
 
 
 async def _acquire_solve_slot(
@@ -49,6 +49,11 @@ async def _acquire_solve_slot(
     global _active_solves
     limit = _concurrency_limit(concurrency)
     started = time.monotonic()
+
+    if limit == 0:
+        async with _solve_slot_condition:
+            _active_solves += 1
+        return 0, 0.0, True
 
     async def acquire() -> None:
         global _active_solves

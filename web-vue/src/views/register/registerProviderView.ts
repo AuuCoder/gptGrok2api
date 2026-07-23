@@ -80,6 +80,13 @@ export const turnstileProviderOptions = [
 
 export const turnstileProviderGroups = [{ options: turnstileProviderOptions }]
 
+export const grokSignupFlowGroups = [{
+  options: [
+    { value: 'xconsole', label: '参考链路（推荐）' },
+    { value: 'legacy', label: '原注册链路' },
+  ],
+}]
+
 export const registerProxyModeOptions = [
   { value: 'global', label: '使用默认代理' },
   { value: 'direct', label: '直连' },
@@ -136,6 +143,7 @@ export const providerLocalOnlyKeys: Record<string, string[]> = {
 }
 
 export const defaultGrokRegisterConfig: GrokRegisterConfig = {
+  signup_flow: 'xconsole',
   provider: 'yescaptcha',
   api_key: '',
   api_base: '',
@@ -199,6 +207,9 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     enabled: false,
     pool_id: '',
   },
+  agent_identity_archive: {
+    enabled: true,
+  },
   mail: {
     request_timeout: 30,
     wait_timeout: 30,
@@ -260,13 +271,18 @@ export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig 
   return {
     ...defaultGrokRegisterConfig,
     ...input,
+    signup_flow: input.signup_flow === 'legacy' ? 'legacy' : 'xconsole',
     provider: normalizeTurnstileProvider(input.provider),
     api_key: String(input.api_key || '').trim(),
     api_base: String(input.api_base || '').trim(),
     request_timeout: Math.max(1, Number(input.request_timeout) || defaultGrokRegisterConfig.request_timeout),
     captcha_timeout: Math.max(1, Number(input.captcha_timeout) || defaultGrokRegisterConfig.captcha_timeout),
     captcha_poll_interval: Math.max(1, Math.min(60, Math.round(Number(input.captcha_poll_interval) || defaultGrokRegisterConfig.captcha_poll_interval))),
-    local_concurrency: Math.max(1, Math.min(16, Math.round(Number(input.local_concurrency) || defaultGrokRegisterConfig.local_concurrency))),
+    local_concurrency: Math.max(0, Math.min(64, Math.round(
+      Number.isFinite(Number(input.local_concurrency))
+        ? Number(input.local_concurrency)
+        : defaultGrokRegisterConfig.local_concurrency,
+    ))),
     create_path: String(input.create_path || defaultGrokRegisterConfig.create_path).trim(),
     result_path: String(input.result_path || defaultGrokRegisterConfig.result_path).trim(),
     max_mail_retries: Math.max(1, Math.min(20, Number(input.max_mail_retries) || defaultGrokRegisterConfig.max_mail_retries)),
@@ -466,6 +482,14 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     enabled: Boolean(cpaSyncSource.enabled),
     pool_id: String(cpaSyncSource.pool_id || '').trim(),
   }
+  const agentIdentityArchiveSource = raw.agent_identity_archive || {}
+  const agentIdentityArchive = {
+    ...defaultRegisterConfig.agent_identity_archive,
+    ...agentIdentityArchiveSource,
+    enabled: Object.prototype.hasOwnProperty.call(agentIdentityArchiveSource, 'enabled')
+      ? Boolean(agentIdentityArchiveSource.enabled)
+      : true,
+  }
   return {
     ...defaultRegisterConfig,
     ...raw,
@@ -476,6 +500,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     checkout,
     sub2api_sync: sub2apiSync,
     cpa_sync: cpaSync,
+    agent_identity_archive: agentIdentityArchive,
     stats: { ...defaultRegisterConfig.stats, ...(raw.stats || {}) },
     logs: Array.isArray(raw.logs) ? raw.logs : [],
     grok_oauth_logs: Array.isArray(raw.grok_oauth_logs) ? raw.grok_oauth_logs : [],
@@ -667,6 +692,9 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     cpa_sync: {
       enabled: Boolean(config.cpa_sync?.enabled),
       pool_id: String(config.cpa_sync?.pool_id || '').trim(),
+    },
+    agent_identity_archive: {
+      enabled: config.agent_identity_archive?.enabled !== false,
     },
     mail: {
       ...config.mail,

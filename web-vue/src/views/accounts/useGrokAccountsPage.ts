@@ -79,6 +79,8 @@ export function useGrokAccountsPage() {
   const removingAccountId = ref('')
   const exportBusy = ref(false)
   const snapshotRefreshBusy = ref(false)
+  const probePollingEnabled = ref(false)
+  const probePollingBusy = ref(false)
 
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
@@ -109,6 +111,7 @@ export function useGrokAccountsPage() {
       summary.value = response.summary && typeof response.summary === 'object' ? response.summary : {}
       runtimeAvailable.value = Boolean(response.runtime_available)
       runtimeError.value = String(response.runtime_error || '').trim()
+      probePollingEnabled.value = Boolean(response.probe_scheduler?.enabled)
       const currentIds = new Set(accounts.value.map((item) => item.id))
       selectedIds.value = selectedIds.value.filter((id) => currentIds.has(id))
     },
@@ -176,6 +179,31 @@ export function useGrokAccountsPage() {
   async function loadWithRuntimeSnapshot(options: { silentErrorToast?: boolean; silentLoading?: boolean } = {}) {
     await loadData(options)
     if (pageRuntime.canRun.value) void refreshRuntimeSnapshot()
+  }
+
+  async function toggleProbePolling() {
+    if (probePollingBusy.value || !pageRuntime.canRun.value) return
+    const enabled = !probePollingEnabled.value
+    if (enabled) {
+      const confirmed = await confirmDialog.ask({
+        title: '开启 Grok 自动轮询',
+        message: '开启后将定时检查 SSO 和 OAuth 账号，包括无额度/无订阅账号，并按当前规则执行自动恢复与未授权回填。是否继续？',
+        confirmText: '开启轮询',
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+    }
+
+    probePollingBusy.value = true
+    try {
+      const result = await grokAccountsApi.setProbePolling(enabled)
+      probePollingEnabled.value = Boolean(result.probe_scheduler?.enabled)
+      toast.success(enabled ? 'Grok 自动轮询已开启' : 'Grok 自动轮询已关闭')
+    } catch (error) {
+      toast.error(`更新轮询状态失败：${errorMessage(error)}`)
+    } finally {
+      probePollingBusy.value = false
+    }
   }
 
   function setViewMode(mode: GrokAccountsViewMode) {
@@ -533,6 +561,9 @@ export function useGrokAccountsPage() {
     summary,
     runtimeAvailable,
     runtimeError,
+    probePollingEnabled,
+    probePollingBusy,
+    toggleProbePolling,
     accountListTotal,
     accountAllTotal,
     currentPage,

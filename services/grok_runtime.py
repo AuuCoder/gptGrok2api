@@ -87,6 +87,7 @@ class EmbeddedGrokRuntime:
         factory: Callable[[], Awaitable[T]],
         *,
         timeout: float = 90.0,
+        cancel_event: threading.Event | None = None,
     ) -> T:
         if not self.available or self._loop is None:
             raise RuntimeError("内置 Grok 运行时尚未启动")
@@ -98,11 +99,19 @@ class EmbeddedGrokRuntime:
             raise RuntimeError("内置 Grok 同步操作必须在线程池中执行")
 
         future = asyncio.run_coroutine_threadsafe(factory(), self._loop)
-        try:
-            return future.result(timeout=max(1.0, float(timeout)))
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise RuntimeError("内置 Grok 运行时操作超时") from exc
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                future.cancel()
+                raise RuntimeError("内置 Grok 运行时操作已取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                raise RuntimeError("内置 Grok 运行时操作超时")
+            try:
+                return future.result(timeout=min(0.1, remaining))
+            except FutureTimeoutError:
+                continue
 
     async def import_registered_accounts(self) -> dict[str, int]:
         if self._host_app is None:
