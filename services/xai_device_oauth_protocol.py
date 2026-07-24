@@ -31,6 +31,7 @@ from services.xai_cli_oauth_protocol import (
 _DEVICE_VERIFY_URL = "https://auth.x.ai/oauth2/device/verify"
 _DEVICE_APPROVE_HOST = "auth.x.ai"
 _DEVICE_APPROVE_PATH = "/oauth2/device/approve"
+_DEVICE_APPROVE_URL = f"https://{_DEVICE_APPROVE_HOST}{_DEVICE_APPROVE_PATH}"
 _ACCOUNT_NAVIGATION_HOSTS = {"accounts.x.ai", "auth.x.ai"}
 _ALLOWED_NAVIGATION_HOSTS = {
     "accounts.x.ai",
@@ -95,6 +96,52 @@ def _validated_url(value: object, *, hosts: set[str], stage: str) -> str:
             retryable=True,
         )
     return url
+
+
+def _is_device_done_url(value: object) -> bool:
+    path = urlparse(_clean_text(value)).path.lower()
+    return "/oauth2/device/done" in path or path.endswith("/device/done")
+
+
+def _is_sign_in_url(value: object) -> bool:
+    url = _clean_text(value).lower()
+    return any(marker in url for marker in ("/sign-in", "/login", "signin", "login_required"))
+
+
+def _is_device_authorized_body(value: object) -> bool:
+    body = _clean_text(value).lower()
+    return any(
+        marker in body
+        for marker in ("device authorized", "设备已授权", "you have authorized", "device is authorized")
+    )
+
+
+def _approval_completed(client: GrokProtocolClient, response: Any, *, referer: str) -> bool:
+    location = _clean_text(getattr(response, "headers", {}).get("location"))
+    if _is_sign_in_url(location):
+        raise XaiDeviceOAuthProtocolError("xAI device approval returned to sign-in", stage="approve")
+    if _is_device_done_url(location) or _is_device_authorized_body(getattr(response, "text", "")):
+        return True
+    if not location or getattr(response, "status_code", 0) not in {301, 302, 303, 307, 308}:
+        return False
+
+    next_url = _validated_url(
+        urljoin(str(getattr(response, "url", "") or _DEVICE_APPROVE_URL), location),
+        hosts=_ACCOUNT_NAVIGATION_HOSTS,
+        stage="approve",
+    )
+    if _is_sign_in_url(next_url):
+        raise XaiDeviceOAuthProtocolError("xAI device approval redirected to sign-in", stage="approve")
+    follow = client._request(
+        "GET",
+        next_url,
+        headers={"Accept": "text/html,application/xhtml+xml", "Referer": referer},
+        allow_redirects=True,
+    )
+    final_url = _clean_text(getattr(follow, "url", "")) or next_url
+    if _is_sign_in_url(final_url):
+        raise XaiDeviceOAuthProtocolError("xAI device approval follow-up returned to sign-in", stage="approve")
+    return _is_device_done_url(final_url) or _is_device_authorized_body(getattr(follow, "text", ""))
 
 
 class _ConsentFormParser(HTMLParser):
@@ -599,20 +646,42 @@ class XaiDeviceOAuthProtocol:
 
             if not device_done:
                 self._emit("approve", "提交 Device Code Allow")
-                approve = client._request(
-                    "POST",
-                    approve_url,
-                    data=approve_form,
-                    headers={
-                        "Accept": "text/html,application/xhtml+xml",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Origin": "https://accounts.x.ai",
-                        "Referer": str(consent.url),
-                    },
-                    allow_redirects=False,
-                )
-                if approve.status_code < 200 or approve.status_code >= 400:
-                    raise XaiDeviceOAuthProtocolError("xAI rejected the device approval", stage="approve")
+                minimal_form = {
+                    "user_code": user_code,
+                    "action": "allow",
+                    "principal_type": _clean_text(approve_form.get("principal_type")) or "User",
+                    "principal_id": _clean_text(approve_form.get("principal_id")),
+                }
+                approval_forms = [approve_form]
+                if minimal_form != approve_form:
+                    approval_forms.append(minimal_form)
+                approved = False
+                for approval_index, approval_form in enumerate(approval_forms):
+                    approve = client._request(
+                        "POST",
+                        approve_url if approval_index == 0 else _DEVICE_APPROVE_URL,
+                        data=approval_form,
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "Origin": "https://accounts.x.ai",
+                            "Referer": str(consent.url),
+                        },
+                        allow_redirects=False,
+                    )
+                    if approve.status_code < 200 or approve.status_code >= 400:
+                        if approval_index + 1 < len(approval_forms):
+                            continue
+                        raise XaiDeviceOAuthProtocolError("xAI rejected the device approval", stage="approve")
+                    if _approval_completed(client, approve, referer=str(consent.url)):
+                        approved = True
+                        break
+                if not approved:
+                    raise XaiDeviceOAuthProtocolError(
+                        "xAI device approval did not reach the authorized state",
+                        stage="approve",
+                        retryable=True,
+                    )
 
             self._emit("token", "轮询 xAI OAuth token")
             deadline = time.monotonic() + expires_in
@@ -639,9 +708,15 @@ class XaiDeviceOAuthProtocol:
                 if error == "slow_down":
                     interval = min(interval + 5, 30)
                 elif error not in {"authorization_pending", "slow_down"}:
+                    error_description = _clean_text(token_payload.get("error_description"))
+                    detail = f" ({error_description})" if error_description else ""
                     raise XaiDeviceOAuthProtocolError(
-                        f"xAI Device Code token exchange failed: {error or 'unexpected_response'}",
+                        f"xAI Device Code token exchange failed: {error or 'unexpected_response'}{detail}",
                         stage="token",
+                        # Fresh accounts can transiently reject the first
+                        # one-time device grant after consent. The protocol
+                        # queue is bounded to one retry with a fresh code.
+                        retryable=error == "invalid_grant",
                     )
                 time.sleep(interval)
             raise XaiDeviceOAuthProtocolError("xAI Device Code authorization expired", stage="token", retryable=True)

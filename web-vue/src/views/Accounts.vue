@@ -1290,6 +1290,7 @@ const grokMetricItems = computed(() => {
     { key: 'oauth-expired', label: 'OAuth 过期', value: optionalMetricNumber(oauthStatus.expired), valueClass: 'text-rose-600' },
     { key: 'oauth-invalid', label: 'OAuth 失效', value: optionalMetricNumber(oauthStatus.invalid), valueClass: 'text-rose-600' },
     { key: 'oauth-unauthorized', label: 'OAuth 未授权', value: optionalMetricNumber(oauthStatus.unauthorized), valueClass: 'text-muted-foreground' },
+    { key: 'oauth-denied', label: 'OAuth 拒绝', value: optionalMetricNumber(oauthStatus.denied), valueClass: 'text-rose-600' },
   ]
   for (const metric of oauthMetrics) {
     if (metric.value === null) continue

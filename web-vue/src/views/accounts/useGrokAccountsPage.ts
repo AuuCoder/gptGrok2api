@@ -42,6 +42,7 @@ export const grokAccountStatusFilterOptions = [
   { label: '运行异常', value: 'abnormal' },
   { label: '运行禁用', value: 'disabled' },
   { label: 'OAuth 未授权', value: 'oauth_unauthorized' },
+  { label: 'OAuth 拒绝', value: 'oauth_denied' },
   { label: 'OAuth 正常', value: 'oauth_normal' },
   { label: 'OAuth 限流', value: 'oauth_limited' },
   { label: '无额度/无订阅', value: 'oauth_no_quota' },

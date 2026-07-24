@@ -383,6 +383,9 @@ class GrokAccountStore:
                 "has_sso": bool(_normalize_sso(item.get("sso"))),
                 "source_type": _clean_text(item.get("source_type")) or "protocol",
                 "status": _clean_text(item.get("status")) or "active",
+                "oauth_authorization": copy.deepcopy(item.get("oauth_authorization"))
+                if isinstance(item.get("oauth_authorization"), dict)
+                else {},
                 "created_at": _clean_text(item.get("created_at")),
                 "updated_at": _clean_text(item.get("updated_at")),
             }
@@ -518,6 +521,48 @@ class GrokAccountStore:
                 changed = True
                 next_items.append(current)
 
+            if changed:
+                self._save_unlocked(next_items)
+            return changed
+
+    def update_oauth_authorization_state(
+        self,
+        account_id: str,
+        *,
+        status: str,
+        attempted_at: str | None = None,
+        error: str | None = None,
+        attempts: int | None = None,
+    ) -> bool:
+        """Persist the credential-free result of OAuth authorization."""
+        target_id = _clean_text(account_id)
+        normalized_status = _clean_text(status).lower()
+        if not target_id or normalized_status not in {"pending", "success", "failed", "denied"}:
+            return False
+
+        with self._lock:
+            items = self._load_unlocked()
+            now = _now()
+            changed = False
+            next_items: list[dict[str, Any]] = []
+            for item in items:
+                current = dict(item)
+                if _clean_text(current.get("id")) != target_id:
+                    next_items.append(current)
+                    continue
+                state = dict(current.get("oauth_authorization")) if isinstance(
+                    current.get("oauth_authorization"), dict
+                ) else {}
+                state["status"] = normalized_status
+                state["attempted_at"] = _clean_text(attempted_at) or now
+                if error is not None:
+                    state["error"] = _clean_text(error)[:300]
+                if attempts is not None:
+                    state["attempts"] = _non_negative_int(attempts)
+                current["oauth_authorization"] = state
+                current["updated_at"] = now
+                changed = True
+                next_items.append(current)
             if changed:
                 self._save_unlocked(next_items)
             return changed

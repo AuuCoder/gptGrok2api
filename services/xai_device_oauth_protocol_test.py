@@ -147,7 +147,11 @@ class DeviceConsentFormTest(unittest.TestCase):
                 url="https://accounts.x.ai/oauth2/device/consent?user_code=ABCD-EFGH",
                 text=self.HTML,
             ),
-            response(status=302, url="https://auth.x.ai/oauth2/device/approve"),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/approve",
+                headers={"location": "https://accounts.x.ai/oauth2/device/done"},
+            ),
             response(payload={"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 21_600}),
         ]
 
@@ -173,6 +177,47 @@ class DeviceConsentFormTest(unittest.TestCase):
         client.create_castle_token.assert_not_called()
         solver_type.assert_not_called()
         self.assertNotIn("saved-sso-token", repr(client._request.call_args_list))
+
+    def test_invalid_grant_is_retryable_with_a_fresh_device_code(self) -> None:
+        def response(*, status: int = 200, url: str = "", headers=None, payload=None, text: str = ""):
+            item = MagicMock()
+            item.status_code = status
+            item.url = url
+            item.headers = headers or {}
+            item.text = text
+            item.json.return_value = payload or {}
+            return item
+
+        client = MagicMock()
+        client._request.side_effect = [
+            response(payload={"device_code": "device-code", "user_code": "ABCD-EFGH", "expires_in": 300}),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/verify",
+                headers={"location": "https://accounts.x.ai/oauth2/device/consent?user_code=ABCD-EFGH"},
+            ),
+            response(
+                url="https://accounts.x.ai/oauth2/device/consent?user_code=ABCD-EFGH",
+                text=self.HTML,
+            ),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/approve",
+                headers={"location": "https://accounts.x.ai/oauth2/device/done"},
+            ),
+            response(status=400, payload={"error": "invalid_grant"}),
+        ]
+
+        with patch("services.xai_device_oauth_protocol.GrokProtocolClient", return_value=client):
+            with self.assertRaises(XaiDeviceOAuthProtocolError) as raised:
+                XaiDeviceOAuthProtocol({}, proxy="direct").authorize(
+                    email="person@example.com",
+                    password="",
+                    sso="saved-sso-token",
+                )
+
+        self.assertEqual(raised.exception.stage, "token")
+        self.assertTrue(raised.exception.retryable)
 
     def test_expired_saved_sso_falls_back_to_password_login(self) -> None:
         def response(*, status: int = 200, url: str = "", headers=None, payload=None, text: str = ""):
@@ -210,7 +255,11 @@ class DeviceConsentFormTest(unittest.TestCase):
                 headers={"location": "https://accounts.x.ai/oauth2/device/consent"},
             ),
             response(url="https://accounts.x.ai/oauth2/device/consent", text=self.HTML),
-            response(status=302, url="https://auth.x.ai/oauth2/device/approve"),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/approve",
+                headers={"location": "https://accounts.x.ai/oauth2/device/done"},
+            ),
             response(payload={"access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 21_600}),
         ]
         solver = MagicMock()
@@ -418,7 +467,11 @@ class DeviceConsentFormTest(unittest.TestCase):
                 headers={"location": "https://accounts.x.ai/oauth2/device/consent"},
             ),
             response(url="https://accounts.x.ai/oauth2/device/consent", text=consent_html),
-            response(status=302, url="https://auth.x.ai/oauth2/device/approve"),
+            response(
+                status=302,
+                url="https://auth.x.ai/oauth2/device/approve",
+                headers={"location": "https://accounts.x.ai/oauth2/device/done"},
+            ),
             response(
                 payload={
                     "access_token": "access-token",

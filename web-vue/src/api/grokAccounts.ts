@@ -20,6 +20,7 @@ export type GrokAccountStatusFilter =
   | 'probe_invalid'
   | 'probe_unknown'
   | 'oauth_unauthorized'
+  | 'oauth_denied'
   | 'oauth_normal'
   | 'oauth_limited'
   | 'oauth_no_quota'
@@ -57,7 +58,7 @@ export type GrokAccountsSummary = {
   runtime_total?: number
   oauth_total?: number
   oauth_linked?: number
-  oauth_status?: Partial<Record<'unauthorized' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid', number>>
+  oauth_status?: Partial<Record<'unauthorized' | 'denied' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid', number>>
   runtime_status?: Partial<Record<'active' | 'cooling' | 'invalid' | 'disabled', number>>
   calls_total?: number
   quota?: Partial<Record<GrokQuotaMode, number>>
@@ -107,6 +108,12 @@ export type GrokAccount = {
   tags?: string[]
   sync_state?: GrokAccountSyncState
   oauth?: GrokOAuthAccount | null
+  oauth_authorization?: {
+    status?: 'pending' | 'success' | 'failed' | 'denied' | (string & {})
+    attempted_at?: string | number | null
+    error?: string
+    attempts?: number
+  }
 }
 
 export type GrokAccountsListParams = {

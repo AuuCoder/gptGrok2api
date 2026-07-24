@@ -210,21 +210,35 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                 [(call.args, call.kwargs) for call in sink.call_args_list],
                 [((queued["id"],), {"prioritize": True}), ((reused["id"],), {"prioritize": True})],
             )
+            states = {
+                item["id"]: item.get("oauth_authorization", {}).get("status")
+                for item in grok_store.list_accounts(redacted=False)
+            }
+            self.assertEqual(states[queued["id"]], "pending")
+            self.assertEqual(states[reused["id"]], "pending")
 
     def test_grok_oauth_log_shows_full_email(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = self._service(temp_dir)
+            grok_store = GrokAccountStore(Path(temp_dir) / "grok_accounts.json")
+            account = grok_store.upsert(
+                {"email": "complete-address@example.com", "password": "password", "sso": "sso", "status": "active"}
+            )["item"]
 
-            service.handle_grok_oauth_protocol_event(
-                {
-                    "status": "failed",
-                    "email": "complete-address@example.com",
-                    "error": "authorization failed",
-                }
-            )
+            with patch.object(register_service_module, "grok_account_store", grok_store):
+                service.handle_grok_oauth_protocol_event(
+                    {
+                        "status": "failed",
+                        "source_account_id": account["id"],
+                        "email": "complete-address@example.com",
+                        "error": "invalid_grant (Access denied)",
+                    }
+                )
 
             text = service.get()["grok_oauth_logs"][-1]["text"]
             self.assertIn("complete-address@example.com", text)
+            saved = grok_store.get_accounts_by_ids([account["id"]])[0]
+            self.assertEqual(saved["oauth_authorization"]["status"], "denied")
 
     def test_grok_probe_scheduler_respects_disabled_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -637,6 +651,17 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             store.upsert(
                 {"email": "no-oauth@example.com", "password": "password", "sso": "other-sso-secret", "status": "active"}
             )
+            store.upsert(
+                {"email": "pending@example.com", "password": "password", "sso": "", "status": "pending_sso"}
+            )
+            denied = store.upsert(
+                {"email": "denied@example.com", "password": "password", "sso": "denied-sso", "status": "active"}
+            )
+            store.update_oauth_authorization_state(
+                denied["item"]["id"],
+                status="denied",
+                error="invalid_grant (Access denied)",
+            )
             blocked = store.upsert(
                 {"email": "blocked@example.com", "password": "password", "sso": "blocked-sso-secret", "status": "active"}
             )
@@ -678,6 +703,7 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             ):
                 view = service.grok_accounts_view()
                 unauthorized_view = service.grok_accounts_view(status="oauth_unauthorized")
+                denied_view = service.grok_accounts_view(status="oauth_denied")
                 normal_view = service.grok_accounts_view(status="oauth_normal")
                 no_quota_view = service.grok_accounts_view(status="oauth_no_quota")
                 invalid_view = service.grok_accounts_view(status="oauth_invalid")
@@ -690,12 +716,13 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
             self.assertEqual(view["summary"]["oauth_linked"], 2)
             self.assertEqual(
                 view["summary"]["oauth_status"],
-                {"unauthorized": 1, "normal": 1, "limited": 0, "no_quota": 1, "expired": 0, "invalid": 0},
+                {"unauthorized": 1, "denied": 1, "normal": 1, "limited": 0, "no_quota": 1, "expired": 0, "invalid": 0},
             )
             self.assertEqual(
                 [entry["email"] for entry in unauthorized_view["items"]],
                 ["no***h@example.com"],
             )
+            self.assertEqual([entry["email"] for entry in denied_view["items"]], ["de***d@example.com"])
             self.assertEqual([entry["id"] for entry in normal_view["items"]], [saved["item"]["id"]])
             self.assertEqual([entry["id"] for entry in no_quota_view["items"]], [blocked["item"]["id"]])
             self.assertEqual(invalid_view["items"], [])
@@ -1300,6 +1327,15 @@ class RegisterServiceGrok2APITest(unittest.TestCase):
                     "status": "submission_unknown",
                 }
             )
+            denied = grok_store.upsert(
+                {
+                    "email": "denied@example.com",
+                    "password": "saved-password",
+                    "sso": "denied-sso",
+                    "status": "active",
+                }
+            )["item"]
+            grok_store.update_oauth_authorization_state(denied["id"], status="denied", error="Access denied")
             service = self._service(temp_dir)
             sink = MagicMock(return_value={"queued": True, "job": {"id": "backfill-job"}})
             service._grok_oauth_protocol_sink = sink

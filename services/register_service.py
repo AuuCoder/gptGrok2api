@@ -293,6 +293,18 @@ def _grok_oauth_display_status(value: object) -> str:
     return "normal" if status == "active" else "invalid"
 
 
+def _grok_oauth_authorizable(item: object) -> bool:
+    """Return whether an SSO registration record is ready for OAuth."""
+    if not isinstance(item, dict):
+        return False
+    authorization = item.get("oauth_authorization") if isinstance(item.get("oauth_authorization"), dict) else {}
+    return (
+        _clean_text(item.get("status")).lower() == "active"
+        and bool(item.get("has_sso") or _clean_text(item.get("token_preview")))
+        and _clean_text(authorization.get("status")).lower() != "denied"
+    )
+
+
 def _batch_summary(payload: object, total: int) -> dict[str, int]:
     data = payload if isinstance(payload, dict) else {}
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else data
@@ -1472,6 +1484,12 @@ class RegisterService:
                     )
                 else:
                     raise RuntimeError("OAuth 协议授权任务未进入队列")
+                grok_account_store.update_oauth_authorization_state(
+                    account_id,
+                    status="pending",
+                    attempted_at=_now(),
+                    error="",
+                )
             except Exception as error:
                 summary["failed"] += 1
                 results.append(
@@ -1505,7 +1523,12 @@ class RegisterService:
             return _clean_text(item.get("probe_status")).lower() == "unknown"
         if status_filter.startswith("oauth_"):
             oauth_status = status_filter.removeprefix("oauth_")
+            if oauth_status == "denied":
+                authorization = item.get("oauth_authorization") if isinstance(item.get("oauth_authorization"), dict) else {}
+                return not isinstance(item.get("oauth"), dict) and _clean_text(authorization.get("status")).lower() == "denied"
             if oauth_status in {"unauthorized", "normal", "limited", "no_quota", "expired", "invalid"}:
+                if oauth_status == "unauthorized":
+                    return _grok_oauth_authorizable(item) and not isinstance(item.get("oauth"), dict)
                 return _grok_oauth_display_status(item.get("oauth")) == oauth_status
         runtime_aliases = {
             "normal": "active",
@@ -1559,6 +1582,7 @@ class RegisterService:
             cached_runtime = raw.get("runtime") if isinstance(raw.get("runtime"), dict) else {}
             cached_probe = raw.get("probe") if isinstance(raw.get("probe"), dict) else {}
             cached_recovery = raw.get("recovery") if isinstance(raw.get("recovery"), dict) else {}
+            oauth_authorization = raw.get("oauth_authorization") if isinstance(raw.get("oauth_authorization"), dict) else {}
             cached_status = _clean_text(cached_runtime.get("status")) if cached_runtime else ""
             cached_runtime_present = bool(cached_runtime) and cached_runtime.get("present") is not False
             merged = {
@@ -1586,6 +1610,14 @@ class RegisterService:
                 "recovery_next_attempt_at": cached_recovery.get("next_attempt_at"),
                 "recovery_error": _clean_text(cached_recovery.get("error"))[:300],
                 "recovery_attempts": max(0, _safe_int(cached_recovery.get("attempts"))),
+                "oauth_authorization": {
+                    "status": _clean_text(oauth_authorization.get("status")).lower(),
+                    "attempted_at": oauth_authorization.get("attempted_at"),
+                    "error": _clean_text(oauth_authorization.get("error"))[:300],
+                    "attempts": max(0, _safe_int(oauth_authorization.get("attempts"))),
+                }
+                if oauth_authorization
+                else {},
                 "sync_state": (
                     "not_ready"
                     if not token
@@ -1613,7 +1645,16 @@ class RegisterService:
                 quota_summary[mode] += max(0, _safe_int(quota.get(mode, {}).get("remaining")))
 
         local_statuses = [_clean_text(item.get("status")).lower() for item in local_items]
-        oauth_display_statuses = [_grok_oauth_display_status(item.get("oauth")) for item in merged_items]
+        oauth_display_statuses = [
+            _grok_oauth_display_status(item.get("oauth"))
+            if isinstance(item.get("oauth"), dict)
+            else "denied"
+            if _clean_text((item.get("oauth_authorization") or {}).get("status")).lower() == "denied"
+            else "unauthorized"
+            if _grok_oauth_authorizable(item)
+            else ""
+            for item in merged_items
+        ]
         summary = {
             "total": len(local_items),
             "active": sum(1 for value in local_statuses if value == "active"),
@@ -1626,7 +1667,7 @@ class RegisterService:
             "oauth_linked": sum(1 for item in merged_items if isinstance(item.get("oauth"), dict)),
             "oauth_status": {
                 status: sum(1 for value in oauth_display_statuses if value == status)
-                for status in ("unauthorized", "normal", "limited", "no_quota", "expired", "invalid")
+                for status in ("unauthorized", "denied", "normal", "limited", "no_quota", "expired", "invalid")
             },
             "runtime_status": runtime_status,
             "calls_total": calls_total,
@@ -2341,6 +2382,9 @@ class RegisterService:
                 continue
             if _clean_text(item.get("status")).lower() != "active" or not _clean_text(item.get("sso")):
                 continue
+            authorization = item.get("oauth_authorization") if isinstance(item.get("oauth_authorization"), dict) else {}
+            if _clean_text(authorization.get("status")).lower() == "denied":
+                continue
             if not _clean_text(item.get("id")) or not _clean_text(item.get("password")):
                 missing_credentials += 1
                 continue
@@ -2400,6 +2444,12 @@ class RegisterService:
                 summary["reused"] += 1
             else:
                 summary["queued"] += 1
+            grok_account_store.update_oauth_authorization_state(
+                account_id,
+                status="pending",
+                attempted_at=_now(),
+                error="",
+            )
         return summary
 
     def _append_grok_probe_event_locked(self, message: str, level: str = "info") -> None:
@@ -3162,6 +3212,12 @@ class RegisterService:
                 "red",
             )
             return
+        grok_account_store.update_oauth_authorization_state(
+            account_id,
+            status="pending",
+            attempted_at=_now(),
+            error="",
+        )
         if bool(started.get("reused")):
             state = "已接入"
         elif bool(started.get("queued")):
@@ -3177,9 +3233,17 @@ class RegisterService:
         email = _clean_text(event.get("email"))
         log_email = email or "未知账号"
         job_id = _clean_text(event.get("job_id"))
+        source_account_id = _clean_text(event.get("source_account_id"))
         recovery_account = xai_cli_oauth_store.find_by_recovery_job_id(job_id) if job_id else None
         recovery_account_id = _clean_text(recovery_account.get("id")) if isinstance(recovery_account, dict) else ""
         if _clean_text(event.get("status")) == "permission_pending":
+            if source_account_id:
+                grok_account_store.update_oauth_authorization_state(
+                    source_account_id,
+                    status="success",
+                    attempted_at=_now(),
+                    error="",
+                )
             self._append_grok_oauth_log(
                 f"Grok OAuth 授权完成，Grok 4.5 权限待生效，已进入延迟复检：{log_email}",
                 "yellow",
@@ -3204,11 +3268,29 @@ class RegisterService:
                     error=error,
                 )
             else:
+                if source_account_id:
+                    normalized_error = error.lower()
+                    grok_account_store.update_oauth_authorization_state(
+                        source_account_id,
+                        status="denied"
+                        if "invalid_grant" in normalized_error or "access denied" in normalized_error
+                        else "failed",
+                        attempted_at=_now(),
+                        error=error,
+                    )
                 self._append_grok_oauth_log(
                     f"Grok OAuth 协议授权失败：{log_email}，原因: {error}",
                     "red",
                 )
             return
+
+        if source_account_id:
+            grok_account_store.update_oauth_authorization_state(
+                source_account_id,
+                status="success",
+                attempted_at=_now(),
+                error="",
+            )
 
         if recovery_account_id:
             recovered_at = _now()

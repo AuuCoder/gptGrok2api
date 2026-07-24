@@ -141,10 +141,13 @@ export function grokSyncStateText(item: GrokAccount): string {
   return '状态未知'
 }
 
-type GrokOAuthDisplayStatus = 'unauthorized' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid'
+type GrokOAuthDisplayStatus = 'not_ready' | 'unauthorized' | 'denied' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid'
 
 function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
-  if (!item.oauth) return 'unauthorized'
+  if (!item.oauth) {
+    if (cleanString(item.oauth_authorization?.status).toLowerCase() === 'denied') return 'denied'
+    return item.status === 'active' && item.has_sso ? 'unauthorized' : 'not_ready'
+  }
   const probeCode = cleanString(item.oauth.probe?.code).toLowerCase()
   if (probeCode === 'personal-team-blocked' || probeCode.startsWith('personal-team-blocked:')) return 'no_quota'
   const status = cleanString(item.oauth.status).toLowerCase()
@@ -159,7 +162,9 @@ function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
 
 export function grokOAuthStatusText(item: GrokAccount): string {
   return ({
+    not_ready: '等待登录态',
     unauthorized: 'OAuth 未授权',
+    denied: 'OAuth 拒绝',
     normal: 'OAuth 正常',
     limited: 'OAuth 限流',
     no_quota: '无额度/无订阅',
@@ -170,7 +175,9 @@ export function grokOAuthStatusText(item: GrokAccount): string {
 
 export function grokOAuthShortStatusText(item: GrokAccount): string {
   return ({
+    not_ready: '待 SSO',
     unauthorized: '未授权',
+    denied: '拒绝',
     normal: '正常',
     limited: '限流',
     no_quota: '无额度/无订阅',
@@ -183,7 +190,7 @@ export function grokOAuthStatusClass(item: GrokAccount): string {
   const status = grokOAuthDisplayStatus(item)
   if (status === 'normal') return PILL_TONE_CLASS.success
   if (status === 'limited' || status === 'no_quota') return PILL_TONE_CLASS.warning
-  if (status === 'expired' || status === 'invalid') return PILL_TONE_CLASS.danger
+  if (status === 'denied' || status === 'expired' || status === 'invalid') return PILL_TONE_CLASS.danger
   return PILL_TONE_CLASS.neutral
 }
 
