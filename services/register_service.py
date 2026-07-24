@@ -3197,10 +3197,21 @@ class RegisterService:
             if isinstance(payload.get("oauth_session_cookies"), dict)
             else {}
         )
-        persisted_payload = {key: value for key, value in payload.items() if key != "oauth_session_cookies"}
+        oauth_credential = (
+            dict(payload.get("oauth_credential"))
+            if isinstance(payload.get("oauth_credential"), dict)
+            else {}
+        )
+        oauth_live_error = _clean_text(payload.get("oauth_live_error"))
+        transient_keys = {"oauth_session_cookies", "oauth_credential", "oauth_live_error"}
+        persisted_payload = {key: value for key, value in payload.items() if key not in transient_keys}
         saved = self._persist_grok_account_snapshot(persisted_payload)
         if session_cookies:
             saved["_oauth_session_cookies"] = session_cookies
+        if oauth_credential:
+            saved["_oauth_credential"] = oauth_credential
+        if oauth_live_error:
+            saved["_oauth_live_error"] = oauth_live_error
         return saved
 
     def _enqueue_grok_oauth_protocol(self, saved: dict[str, Any]) -> None:
@@ -3218,12 +3229,32 @@ class RegisterService:
             if isinstance(saved.get("_oauth_session_cookies"), dict)
             else {}
         )
-        try:
-            started = self._grok_oauth_protocol_sink(
+        oauth_credential = (
+            dict(saved.get("_oauth_credential"))
+            if isinstance(saved.get("_oauth_credential"), dict)
+            else {}
+        )
+        oauth_live_error = _clean_text(saved.get("_oauth_live_error"))
+        if oauth_live_error:
+            grok_account_store.update_oauth_authorization_state(
                 account_id,
-                prioritize=True,
-                session_cookies=session_cookies,
+                status="failed",
+                attempted_at=_now(),
+                error=oauth_live_error,
             )
+            self._append_grok_oauth_log(
+                f"Grok OAuth 注册会话授权失败：{log_email}，原因: {oauth_live_error}",
+                "red",
+            )
+            return
+        try:
+            start_kwargs: dict[str, Any] = {
+                "prioritize": True,
+                "session_cookies": session_cookies,
+            }
+            if oauth_credential:
+                start_kwargs["preauthorized_credential"] = oauth_credential
+            started = self._grok_oauth_protocol_sink(account_id, **start_kwargs)
         except Exception as error:
             self._append_grok_oauth_log(
                 f"Grok OAuth 协议授权启动失败: {log_email}，原因: {self._grok2api_error_text(error)}",
@@ -3985,7 +4016,7 @@ class RegisterService:
                         already_persisted = bool(result.get("account_persisted")) if isinstance(result, dict) else False
                         if target == "grok" and has_grok_account and (ok or not already_persisted):
                             saved = self._persist_grok_worker_result(result)
-                            if ok:
+                            if ok or _clean_text(saved.get("_oauth_live_error")):
                                 self._enqueue_grok_oauth_protocol(saved)
                         success += 1 if ok else 0
                         fail += 0 if ok else 1
@@ -4010,6 +4041,7 @@ def _start_xai_cli_oauth_protocol(
     prioritize: bool = False,
     retry: bool = False,
     session_cookies: dict[str, str] | None = None,
+    preauthorized_credential: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from services.xai_cli_oauth_service import xai_cli_oauth_service
 
@@ -4018,6 +4050,7 @@ def _start_xai_cli_oauth_protocol(
         prioritize=prioritize,
         retry=retry,
         session_cookies=session_cookies,
+        preauthorized_credential=preauthorized_credential,
     )
 
 

@@ -1078,6 +1078,11 @@ class RegisterServiceGrokTest(unittest.TestCase):
                             "sso": "oauth-default-sso",
                             "session": "live-cookie",
                         },
+                        "oauth_credential": {
+                            "access_token": "live-access-token",
+                            "refresh_token": "live-refresh-token",
+                            "expires_in": 3600,
+                        },
                     },
                 },
             )
@@ -1088,11 +1093,20 @@ class RegisterServiceGrokTest(unittest.TestCase):
                 *,
                 prioritize: bool = False,
                 session_cookies: dict[str, str] | None = None,
+                preauthorized_credential: dict[str, object] | None = None,
             ) -> dict[str, object]:
                 self.assertTrue(prioritize)
                 self.assertEqual(
                     session_cookies,
                     {"sso": "oauth-default-sso", "session": "live-cookie"},
+                )
+                self.assertEqual(
+                    preauthorized_credential,
+                    {
+                        "access_token": "live-access-token",
+                        "refresh_token": "live-refresh-token",
+                        "expires_in": 3600,
+                    },
                 )
                 protocol_calls.append(account_id)
                 return {"reused": False, "job": {"id": "xai-protocol-test"}}
@@ -1112,6 +1126,10 @@ class RegisterServiceGrokTest(unittest.TestCase):
             accounts = account_store.list_accounts(redacted=False)
             self.assertEqual(protocol_calls, [accounts[0]["id"]])
             self.assertNotIn("oauth_session_cookies", accounts[0])
+            self.assertNotIn("oauth_credential", accounts[0])
+            persisted = (Path(temp_dir) / "grok_accounts.json").read_text(encoding="utf-8")
+            self.assertNotIn("live-access-token", persisted)
+            self.assertNotIn("live-refresh-token", persisted)
             self.assertTrue(
                 any("Grok OAuth 授权已启动" in entry["text"] for entry in service.get()["grok_oauth_logs"])
             )

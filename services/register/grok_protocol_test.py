@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+import tempfile
+import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -163,6 +167,98 @@ class LandingMetadataTest(unittest.TestCase):
 
 
 class FlightTest(unittest.TestCase):
+    def test_xconsole_reference_checkout_delegates_entire_signup_session(self) -> None:
+        observed: dict[str, object] = {}
+
+        class FakeReferenceClient:
+            def __init__(self, **kwargs: object) -> None:
+                self._t = SimpleNamespace(_session=MagicMock())
+                self.next_action_id = "a" * 42
+                observed["client"] = self
+                observed["init"] = kwargs
+
+            def load_signup_page(self) -> int:
+                return 200
+
+            def create_email_validation_code(self, email: str) -> object:
+                observed["send"] = email
+                return SimpleNamespace(ok=True, http_status=200)
+
+            def verify_email_validation_code(self, email: str, code: str) -> object:
+                observed["verify"] = (email, code)
+                return SimpleNamespace(ok=True, http_status=200)
+
+            def validate_password(self, email: str, password: str) -> object:
+                observed["password"] = (email, password)
+                return object()
+
+            def create_account(self, **kwargs: object) -> object:
+                observed["create"] = kwargs
+                return SimpleNamespace(ok=True, http_status=200)
+
+            def fetch_sso_token(self, **kwargs: object) -> str:
+                observed["sso"] = kwargs
+                return "reference-sso"
+
+            def close(self) -> None:
+                observed["closed"] = True
+
+        package = types.ModuleType("xconsole_client")
+        package.__path__ = []
+        module = types.ModuleType("xconsole_client.client")
+        module.XConsoleAuthClient = FakeReferenceClient
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reference_dir = Path(temp_dir)
+            client_file = reference_dir / "xconsole_client" / "client.py"
+            client_file.parent.mkdir()
+            client_file.write_text("# test fixture\n", encoding="utf-8")
+            with patch.dict(
+                sys.modules,
+                {
+                    "xconsole_client": package,
+                    "xconsole_client.client": module,
+                },
+            ):
+                client = grok_protocol.GrokProtocolClient(
+                    {
+                        "signup_flow": "xconsole",
+                        "xai_cli_pkce_reference_dir": str(reference_dir),
+                    }
+                )
+                self.assertIs(client.session, observed["client"]._t._session)
+                client.bootstrap()
+                client.send_email_validation_code("person@example.com")
+                client.verify_email_validation_code("person@example.com", "ABC-123")
+                client.validate_password("person@example.com", "Password1!")
+                result = client.create_user_and_session(
+                    email="person@example.com",
+                    code="ABC-123",
+                    given_name="Test",
+                    family_name="User",
+                    password="Password1!",
+                    turnstile_token="turnstile-token",
+                )
+                client.close()
+
+        self.assertEqual(result["sso"], "reference-sso")
+        self.assertEqual(observed["send"], "person@example.com")
+        self.assertEqual(observed["verify"], ("person@example.com", "ABC-123"))
+        self.assertEqual(observed["create"]["castle_request_token"], "")
+        self.assertEqual(observed["sso"], {"email": "", "password": "", "save": False, "retries": 3})
+        self.assertTrue(observed["closed"])
+
+    def test_xconsole_defaults_to_cloud_console_signup_context(self) -> None:
+        client = grok_protocol.GrokProtocolClient({"signup_flow": "xconsole"})
+        self.addCleanup(client.close)
+
+        self.assertEqual(
+            client.signup_url,
+            "https://accounts.x.ai/sign-up?redirect=cloud-console",
+        )
+        self.assertEqual(client.session.headers["Sec-CH-UA-Platform"], '"Windows"')
+        self.assertEqual(client.session.headers["Accept-Language"], "zh-CN,zh;q=0.9")
+
     def test_resolves_root_promise_record(self) -> None:
         payload = (
             '0:{"a":"$@1","f":"unused"}\n'

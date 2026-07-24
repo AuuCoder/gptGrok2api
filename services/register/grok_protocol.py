@@ -10,6 +10,7 @@ import selectors
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -26,6 +27,7 @@ from services.config import DATA_DIR
 
 DEFAULT_BASE_URL = "https://accounts.x.ai"
 DEFAULT_SIGNUP_PATH = "/sign-up?redirect=grok-com"
+REFERENCE_SIGNUP_PATH = "/sign-up?redirect=cloud-console"
 DEFAULT_ACTION_ID = "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259"
 DEFAULT_CASTLE_PK = "pk_p8GGWvD3TmFJZRsX3BQcqAv9aFVispNz"
 DEFAULT_TURNSTILE_SITEKEY = "0x4AAAAAAAhr9JGVDZbrZOo0"
@@ -66,6 +68,7 @@ _DISCOVERY_CACHE: dict[str, tuple[float, "SignupMetadata"]] = {}
 _SESSION_REDIRECT_HOSTS = (
     "accounts.x.ai",
     "auth.x.ai",
+    "console.x.ai",
     "grok.com",
     "auth.grokusercontent.com",
     "auth.grokipedia.com",
@@ -987,7 +990,8 @@ class GrokProtocolClient:
         flow = str(self.config.get("signup_flow") or "legacy").strip().lower()
         self.signup_flow = flow if flow in {"legacy", "xconsole"} else "legacy"
         self.base_url = str(self.config.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
-        signup_path = str(self.config.get("signup_path") or DEFAULT_SIGNUP_PATH).strip()
+        default_signup_path = REFERENCE_SIGNUP_PATH if self.signup_flow == "xconsole" else DEFAULT_SIGNUP_PATH
+        signup_path = str(self.config.get("signup_path") or default_signup_path).strip()
         self.signup_url = urljoin(f"{self.base_url}/", signup_path.lstrip("/"))
         self.proxy = str(proxy or "").strip()
         self.request_timeout = max(1.0, float(self.config.get("request_timeout") or 30))
@@ -997,20 +1001,53 @@ class GrokProtocolClient:
         self.log = log
         default_impersonate = "chrome146" if self.signup_flow == "xconsole" else "chrome120"
         impersonate = str(self.config.get("impersonate") or default_impersonate).strip()
-        self.session = requests.Session(impersonate=impersonate, trust_env=False)
-        self.session.headers.update(
-            {
-                "User-Agent": self.user_agent,
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
+        self._reference_client: Any = None
+        reference_dir = Path(str(self.config.get("xai_cli_pkce_reference_dir") or "")).expanduser()
+        reference_client_file = reference_dir / "xconsole_client" / "client.py"
+        if self.signup_flow == "xconsole" and reference_client_file.is_file():
+            reference_path = str(reference_dir.resolve())
+            if reference_path not in sys.path:
+                sys.path.insert(0, reference_path)
+            from xconsole_client.client import XConsoleAuthClient
+
+            self._reference_client = XConsoleAuthClient(
+                debug=False,
+                signup_url=self.signup_url,
+                impersonate=impersonate,
+                proxy=None if self.proxy.lower() == "direct" else self.proxy,
+            )
+            self.session = self._reference_client._t._session
+        else:
+            session_options: dict[str, Any] = {"impersonate": impersonate, "trust_env": False}
+            if self.signup_flow == "xconsole":
+                session_options["http_version"] = "v2"
+            self.session = requests.Session(**session_options)
+            self.session.headers.update(
+                {
+                    "User-Agent": self.user_agent,
+                    "Accept-Language": "zh-CN,zh;q=0.9" if self.signup_flow == "xconsole" else "en-US,en;q=0.9",
+                    **(
+                        {
+                            "Accept-Encoding": "gzip, deflate, br, zstd",
+                            "Sec-CH-UA": '"Chromium";v="146", "Google Chrome";v="146", "Not/A)Brand";v="99"',
+                            "Sec-CH-UA-Mobile": "?0",
+                            "Sec-CH-UA-Platform": '"Windows"',
+                        }
+                        if self.signup_flow == "xconsole"
+                        else {}
+                    ),
+                }
+            )
         self.metadata: SignupMetadata | None = None
         self._landing_html = ""
         self._script_sources: dict[str, str] = {}
         self._grok_session_warmed = False
 
     def close(self) -> None:
-        self.session.close()
+        if self._reference_client is not None:
+            self._reference_client.close()
+        else:
+            self.session.close()
 
     def _emit(self, message: str) -> None:
         if self.log:
@@ -1171,6 +1208,25 @@ class GrokProtocolClient:
             return metadata
 
     def bootstrap(self, *, force: bool = False) -> SignupMetadata:
+        if self._reference_client is not None:
+            del force
+            status = int(self._reference_client.load_signup_page())
+            if not 200 <= status < 300:
+                raise GrokProtocolError(
+                    f"公网版注册页访问失败: HTTP {status}",
+                    stage="bootstrap",
+                    retryable=status in {403, 429, 500, 502, 503, 504},
+                )
+            self.metadata = SignupMetadata(
+                signup_url=self.signup_url,
+                action_id=str(self._reference_client.next_action_id),
+                sitekey=str(self.config.get("sitekey") or DEFAULT_TURNSTILE_SITEKEY),
+                castle_pk="",
+                router_state_tree=[],
+                castle_sdk_url="",
+                castle_sdk_path="",
+            )
+            return self.metadata
         html = self._get_landing()
         self.metadata = self._discover(html, force=force)
         return self.metadata
@@ -1215,6 +1271,16 @@ class GrokProtocolClient:
         return decode_grpc_web_response(bytes(response.content or b""), response.headers)
 
     def send_email_validation_code(self, email: str) -> None:
+        if self._reference_client is not None:
+            result = self._reference_client.create_email_validation_code(email)
+            if not bool(result.ok):
+                raise GrokProtocolError(
+                    f"公网版 Grok 发码失败: HTTP {result.http_status}",
+                    stage="grpc",
+                    retryable=int(result.http_status or 0) in {429, 500, 502, 503, 504},
+                    mail_retryable=True,
+                )
+            return
         castle_token = "" if self.signup_flow == "xconsole" else self.create_castle_token()
         self._grpc_post(
             "/auth_mgmt.AuthManagement/CreateEmailValidationCode",
@@ -1224,6 +1290,9 @@ class GrokProtocolClient:
     send_email_code = send_email_validation_code
 
     def validate_password(self, email: str, password: str) -> None:
+        if self._reference_client is not None:
+            self._reference_client.validate_password(email, password)
+            return
         if self.signup_flow != "xconsole":
             return
         self._grpc_post(
@@ -1232,6 +1301,15 @@ class GrokProtocolClient:
         )
 
     def verify_email_validation_code(self, email: str, code: str) -> str:
+        if self._reference_client is not None:
+            result = self._reference_client.verify_email_validation_code(email, code)
+            if not bool(result.ok):
+                raise GrokProtocolError(
+                    f"公网版 Grok 验码失败: HTTP {result.http_status}",
+                    stage="grpc",
+                    retryable=int(result.http_status or 0) in {429, 500, 502, 503, 504},
+                )
+            return ""
         result = self._grpc_post(
             "/auth_mgmt.AuthManagement/VerifyEmailValidationCode",
             verify_email_validation_request(email, code),
@@ -1549,6 +1627,72 @@ class GrokProtocolClient:
         password: str,
         turnstile_token: str,
     ) -> dict[str, Any]:
+        if self._reference_client is not None:
+            result = self._reference_client.create_account(
+                email=email,
+                given_name=given_name,
+                family_name=family_name,
+                password=password,
+                email_validation_code=code,
+                turnstile_token=turnstile_token,
+                castle_request_token="",
+                conversion_id=str(uuid.uuid4()),
+            )
+            if not bool(result.ok):
+                fresh_turnstile = self.solve_turnstile()
+                result = self._reference_client.create_account(
+                    email=email,
+                    given_name=given_name,
+                    family_name=family_name,
+                    password=password,
+                    email_validation_code=code,
+                    turnstile_token=fresh_turnstile,
+                    castle_request_token="",
+                    conversion_id=str(uuid.uuid4()),
+                )
+            if not bool(result.ok):
+                raise GrokProtocolError(
+                    f"公网版 Grok 创建账号失败: HTTP {result.http_status}",
+                    stage="create_account",
+                    retryable=int(result.http_status or 0) in {429, 500, 502, 503, 504},
+                )
+            sso = str(
+                self._reference_client.fetch_sso_token(
+                    email="",
+                    password="",
+                    save=False,
+                    retries=3,
+                )
+                or ""
+            ).strip()
+            if not sso:
+                raise GrokProtocolError(
+                    "公网版 Grok 注册成功但未获得 SSO",
+                    stage="session_exchange",
+                    reason_code="reference_missing_sso",
+                    account_created=True,
+                    partial_result={
+                        "email": email,
+                        "password": password,
+                        "sso": "",
+                        "profile": {
+                            "given_name": given_name,
+                            "family_name": family_name,
+                            "session_state": "missing",
+                            "session_reason": "reference_missing_sso",
+                        },
+                        "source_type": "protocol",
+                        "status": "pending_sso",
+                    },
+                )
+            return {
+                "email": email,
+                "password": password,
+                "sso": sso,
+                "sso_rw": self._cookie_value("sso-rw"),
+                "redirect_url": "",
+                "session_reason": "reference_sso",
+            }
         response = None
         value: Any = None
         redirect_url = ""

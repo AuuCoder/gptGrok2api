@@ -246,6 +246,60 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             session_cookies=session_cookies,
         )
 
+    async def test_preauthorized_registration_skips_second_protocol_login(self) -> None:
+        source = {
+            "id": "grok-live-source",
+            "email": "live@example.com",
+            "password": "source-password",
+            "sso": "source-sso",
+        }
+        credential = {
+            "access_token": _jwt(
+                {
+                    "sub": "live-subject",
+                    "email": "live@example.com",
+                    "exp": int(time.time()) + 3600,
+                }
+            ),
+            "refresh_token": "live-refresh",
+            "id_token": "",
+            "expires_in": 3600,
+        }
+
+        with patch.object(self.service, "_select_protocol_source_account", return_value=source), patch(
+            "services.register_service.register_service.get",
+            return_value={
+                "grok": {"xai_cli_oauth_flow": "pkce_reference"},
+                "proxy": "direct",
+            },
+        ), patch(
+            "services.xai_reference_pkce_protocol.XaiReferencePkceProtocol"
+        ) as protocol_type, patch.object(
+            self.service,
+            "_fetch_models",
+            new=AsyncMock(return_value=["grok-4.5"]),
+        ), patch.object(
+            self.service,
+            "probe_account",
+            new=AsyncMock(return_value={"status": "valid"}),
+        ):
+            started = await self.service.start_protocol_authorization(
+                "grok-live-source",
+                preauthorized_credential=credential,
+            )
+            job_id = started["job"]["id"]
+            for _ in range(50):
+                await asyncio.sleep(0)
+                job = self.service.get_protocol_authorization_job(job_id)
+                if job and job["status"] not in {"pending", "running"}:
+                    break
+
+        self.assertEqual(job["status"], "authorized")
+        self.assertEqual(job["stage"], "completed")
+        protocol_type.assert_not_called()
+        self.assertNotIn("live-refresh", repr(job))
+        self.assertEqual(self.store.list_accounts()[0]["source_type"], "registered_account_pkce_reference")
+
     async def test_protocol_jobs_are_reused_per_source_account(self) -> None:
         first = {"id": "grok-one", "email": "one@example.com", "password": "password"}
         second = {"id": "grok-two", "email": "two@example.com", "password": "password"}

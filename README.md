@@ -18,7 +18,7 @@ GPTGrok2API 是一个自托管的 GPT 与 Grok 统一网关，将已接入的订
 | GPT 运行时 | 支持 GPT 文本对话、网页搜索、图片生成、图片编辑、会话复用、文件下载以及 PPT/PSD 等可编辑文件任务。 |
 | Grok SSO 运行时 | 内置 Grok 账号池、额度刷新、账号调度、聊天、Responses、Messages、图片生成、图片编辑、视频生成和媒体缓存。 |
 | Grok 后台探测与恢复 | 服务启动后自动探测已加入运行池的非禁用账号；明确失效时使用已保存邮箱和密码重新登录、验证并替换 SSO，无需手动操作。 |
-| Grok Build OAuth | 支持 Device Code 与公网版 Authorization Code + PKCE 授权、Access/Refresh Token 导入、自动刷新、模型探测以及独立 OAuth 凭据存储；新注册可把完整会话直接交给 PKCE，不落盘临时 cookie。 |
+| Grok Build OAuth | 支持 Device Code 与公网版 Authorization Code + PKCE 授权、Access/Refresh Token 导入、自动刷新、模型探测以及独立 OAuth 凭据存储；新注册使用公网版 `redirect=cloud-console` 上下文，并在关闭客户端前复用同一个 live `curl_cffi Session` 完成 PKCE，Turnstile 沿用系统打码配置，临时 Cookie 与 OAuth Token 均不写入注册账号文件。 |
 | 账号生命周期 | 支持账号导入、分组、标签、额度同步、异常状态识别、限流恢复、无效账号清理、批量操作、代理绑定和运行状态监控。 |
 | iCloud Privacy Mail | 内置 sidecar；新接口负责 Apple 登录、2FA 和创建隐私邮箱，旧接口负责登录、2FA 和同步已有邮箱，IMAP App 专用密码负责取验证码。 |
 | iCloud 定时创建 | 按 Apple 账号定时创建邮箱；新接口每小时最多 20 个、旧接口每小时最多 5 个，每账号累计 750 个后自动停止。sidecar 使用 Compose 内部网络，不需要独立账号或宿主机端口。 |

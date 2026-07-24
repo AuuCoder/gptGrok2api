@@ -176,6 +176,44 @@ def _mail_retryable(error: Exception) -> bool:
     )
 
 
+def _authorize_live_pkce(
+    index: int,
+    client: GrokProtocolClient,
+    account: dict[str, Any],
+) -> dict[str, Any]:
+    grok_config = client.config
+    if not _truthy(grok_config.get("xai_cli_oauth_enabled"), True):
+        return {}
+    if str(grok_config.get("xai_cli_oauth_flow") or "device").strip().lower() != "pkce_reference":
+        return {}
+
+    from services.xai_reference_pkce_protocol import XaiReferencePkceProtocol
+
+    reference_dir = str(grok_config.get("xai_cli_pkce_reference_dir") or "").strip()
+    timeout = max(60, int(grok_config.get("captcha_timeout") or 180) + 60)
+    protocol = XaiReferencePkceProtocol(
+        reference_dir,
+        proxy=client.proxy,
+        timeout=timeout,
+        progress=lambda _stage, message: debug_step(index, message),
+        turnstile_config=grok_config,
+    )
+    step(index, "账号创建成功，正在完成 OAuth 授权")
+    credential = protocol.authorize_live_session(
+        email=str(account.get("email") or "").strip(),
+        password=str(account.get("password") or "").strip(),
+        sso=str(account.get("sso") or "").strip(),
+        session=client.session,
+        session_cookies=(
+            dict(account.get("oauth_session_cookies"))
+            if isinstance(account.get("oauth_session_cookies"), dict)
+            else {}
+        ),
+    )
+    step(index, "OAuth 授权完成，正在验证额度", "green")
+    return credential
+
+
 def _register_once(
     index: int,
     client: GrokProtocolClient,
@@ -262,7 +300,7 @@ def _register_once(
         mailbox_finalized = True
         session_cookie_reader = getattr(client, "session_cookies", None)
         session_cookies = session_cookie_reader() if callable(session_cookie_reader) else {}
-        return {
+        result = {
             "email": email,
             "password": password,
             "sso": sso,
@@ -276,6 +314,20 @@ def _register_once(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "active",
         }
+        try:
+            oauth_credential = _authorize_live_pkce(index, client, result)
+        except Exception as error:
+            result["oauth_live_error"] = _short_error(error, limit=500)
+            oauth_error = GrokProtocolError(
+                f"账号已创建，但 OAuth 授权失败: {result['oauth_live_error']}",
+                stage="oauth",
+                account_created=True,
+                partial_result=result,
+            )
+            raise oauth_error from error
+        if oauth_credential:
+            result["oauth_credential"] = oauth_credential
+        return result
     except Exception as error:
         if not mailbox_finalized:
             mail_provider.mark_mailbox_result(mailbox, success=False, error=error)

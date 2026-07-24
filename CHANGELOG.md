@@ -2,7 +2,7 @@
 
 ## 1.1.0 - 2026-07-23
 
-+ [修复] Grok 注册后 OAuth 可切换为公网版 Authorization Code + PKCE，并把注册会话 cookie 仅通过内存传入 PKCE worker；不再要求新账号走 Device Code。
++ [修复] Grok 新注册完整对齐公网版 `redirect=cloud-console` 与 Authorization Code + PKCE：使用一致的 HTTP/2 Chrome 146 指纹，在注册客户端关闭前复用同一个 live `curl_cffi Session` 完成授权，Turnstile 沿用系统本地打码/第三方配置，再以内存凭据进入模型探测与投递；临时 Cookie 和 OAuth Token 均不写入注册账号文件。
 + [新增] OpenAI 账号存活追踪、跨进程 scheduler lease 和手动探测接口；网络或 Token 异常仅记录当次失败，不直接判定账号停用。
 + [新增] Outlook Token 邮箱池改用 SQLite lease 原子预占，支持多进程注册与旧 JSON 状态自动迁移，避免并发 worker 重复领取或覆盖新状态。
 + [新增] Codex Agent Identity 独立加密归档，支持单账号 `auth.json` 和批量 ZIP 导出，私钥不写入普通账号列表。

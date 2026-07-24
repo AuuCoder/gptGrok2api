@@ -456,10 +456,13 @@ class XaiCliOAuthService:
         account_id: str = "",
         *,
         session_cookies: dict[str, str] | None = None,
+        preauthorized_credential: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         source = self._select_protocol_source_account(account_id)
         if session_cookies:
             source = {**source, "_oauth_session_cookies": dict(session_cookies)}
+        if preauthorized_credential:
+            source = {**source, "_preauthorized_oauth_credential": dict(preauthorized_credential)}
         source_account_id = _clean_text(source.get("id"))
         with self._protocol_job_lock:
             self._drop_expired_protocol_jobs_unlocked()
@@ -496,10 +499,12 @@ class XaiCliOAuthService:
         account_id: str = "",
         *,
         session_cookies: dict[str, str] | None = None,
+        preauthorized_credential: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result, source = self._prepare_protocol_authorization(
             account_id,
             session_cookies=session_cookies,
+            preauthorized_credential=preauthorized_credential,
         )
         if source is None:
             return result
@@ -517,11 +522,13 @@ class XaiCliOAuthService:
         prioritize: bool = False,
         retry: bool = False,
         session_cookies: dict[str, str] | None = None,
+        preauthorized_credential: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Queue protocol OAuth from synchronous registration workers."""
         result, source = self._prepare_protocol_authorization(
             account_id,
             session_cookies=session_cookies,
+            preauthorized_credential=preauthorized_credential,
         )
         if source is None:
             return result
@@ -663,13 +670,24 @@ class XaiCliOAuthService:
         grok_config = self._oauth_grok_config(runtime)
         proxy = self._resolve_registration_proxy(runtime.get("proxy"))
         oauth_flow = _clean_text(grok_config.get("xai_cli_oauth_flow")).lower() or "device"
-        if oauth_flow == "pkce_reference":
+        preauthorized = (
+            dict(source.get("_preauthorized_oauth_credential"))
+            if isinstance(source.get("_preauthorized_oauth_credential"), dict)
+            else {}
+        )
+        protocol = None
+        if preauthorized:
+            initial_stage = "models"
+            initial_message = "注册会话 PKCE 已完成，准备验证 OAuth 凭据"
+            source_type = "registered_account_pkce_reference"
+        elif oauth_flow == "pkce_reference":
             from services.xai_reference_pkce_protocol import XaiReferencePkceProtocol
 
             protocol = XaiReferencePkceProtocol(
                 _clean_text(grok_config.get("xai_cli_pkce_reference_dir")),
                 proxy=proxy,
                 timeout=max(60, int(grok_config.get("captcha_timeout") or 180) + 60),
+                turnstile_config=grok_config,
             )
             initial_stage = "pkce"
             initial_message = "准备 Authorization Code + PKCE 参考授权"
@@ -687,19 +705,22 @@ class XaiCliOAuthService:
             self._update_protocol_job(job_id, status="running", stage=stage, message=message)
 
         try:
-            protocol.progress = progress
-            authorize_kwargs = {
-                "email": _clean_text(source.get("email")),
-                "password": _clean_text(source.get("password")),
-                "sso": _clean_text(source.get("sso") or source.get("sso_token")),
-            }
-            if oauth_flow == "pkce_reference":
-                authorize_kwargs["session_cookies"] = (
-                    dict(source.get("_oauth_session_cookies"))
-                    if isinstance(source.get("_oauth_session_cookies"), dict)
-                    else {}
-                )
-            credential = await asyncio.to_thread(protocol.authorize, **authorize_kwargs)
+            if preauthorized:
+                credential = preauthorized
+            else:
+                protocol.progress = progress
+                authorize_kwargs = {
+                    "email": _clean_text(source.get("email")),
+                    "password": _clean_text(source.get("password")),
+                    "sso": _clean_text(source.get("sso") or source.get("sso_token")),
+                }
+                if oauth_flow == "pkce_reference":
+                    authorize_kwargs["session_cookies"] = (
+                        dict(source.get("_oauth_session_cookies"))
+                        if isinstance(source.get("_oauth_session_cookies"), dict)
+                        else {}
+                    )
+                credential = await asyncio.to_thread(protocol.authorize, **authorize_kwargs)
             self._update_protocol_job(job_id, stage="models", message="验证 OAuth 凭据并探测模型")
             imported = await self.import_credentials(
                 access_token=_clean_text(credential.get("access_token")),
