@@ -454,8 +454,12 @@ class XaiCliOAuthService:
     def _prepare_protocol_authorization(
         self,
         account_id: str = "",
+        *,
+        session_cookies: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         source = self._select_protocol_source_account(account_id)
+        if session_cookies:
+            source = {**source, "_oauth_session_cookies": dict(session_cookies)}
         source_account_id = _clean_text(source.get("id"))
         with self._protocol_job_lock:
             self._drop_expired_protocol_jobs_unlocked()
@@ -487,8 +491,16 @@ class XaiCliOAuthService:
             self._protocol_jobs[job_id] = job
         return {"reused": False, "job": self._protocol_job_view(job)}, source
 
-    async def start_protocol_authorization(self, account_id: str = "") -> dict[str, Any]:
-        result, source = self._prepare_protocol_authorization(account_id)
+    async def start_protocol_authorization(
+        self,
+        account_id: str = "",
+        *,
+        session_cookies: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        result, source = self._prepare_protocol_authorization(
+            account_id,
+            session_cookies=session_cookies,
+        )
         if source is None:
             return result
 
@@ -504,9 +516,13 @@ class XaiCliOAuthService:
         *,
         prioritize: bool = False,
         retry: bool = False,
+        session_cookies: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Queue protocol OAuth from synchronous registration workers."""
-        result, source = self._prepare_protocol_authorization(account_id)
+        result, source = self._prepare_protocol_authorization(
+            account_id,
+            session_cookies=session_cookies,
+        )
         if source is None:
             return result
 
@@ -672,12 +688,18 @@ class XaiCliOAuthService:
 
         try:
             protocol.progress = progress
-            credential = await asyncio.to_thread(
-                protocol.authorize,
-                email=_clean_text(source.get("email")),
-                password=_clean_text(source.get("password")),
-                sso=_clean_text(source.get("sso") or source.get("sso_token")),
-            )
+            authorize_kwargs = {
+                "email": _clean_text(source.get("email")),
+                "password": _clean_text(source.get("password")),
+                "sso": _clean_text(source.get("sso") or source.get("sso_token")),
+            }
+            if oauth_flow == "pkce_reference":
+                authorize_kwargs["session_cookies"] = (
+                    dict(source.get("_oauth_session_cookies"))
+                    if isinstance(source.get("_oauth_session_cookies"), dict)
+                    else {}
+                )
+            credential = await asyncio.to_thread(protocol.authorize, **authorize_kwargs)
             self._update_protocol_job(job_id, stage="models", message="验证 OAuth 凭据并探测模型")
             imported = await self.import_credentials(
                 access_token=_clean_text(credential.get("access_token")),

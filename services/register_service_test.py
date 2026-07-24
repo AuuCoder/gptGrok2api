@@ -1074,13 +1074,26 @@ class RegisterServiceGrokTest(unittest.TestCase):
                         "email": "oauth-default@example.com",
                         "password": "password",
                         "sso": "oauth-default-sso",
+                        "oauth_session_cookies": {
+                            "sso": "oauth-default-sso",
+                            "session": "live-cookie",
+                        },
                     },
                 },
             )
             account_store = GrokAccountStore(Path(temp_dir) / "grok_accounts.json")
 
-            def start_protocol(account_id: str, *, prioritize: bool = False) -> dict[str, object]:
+            def start_protocol(
+                account_id: str,
+                *,
+                prioritize: bool = False,
+                session_cookies: dict[str, str] | None = None,
+            ) -> dict[str, object]:
                 self.assertTrue(prioritize)
+                self.assertEqual(
+                    session_cookies,
+                    {"sso": "oauth-default-sso", "session": "live-cookie"},
+                )
                 protocol_calls.append(account_id)
                 return {"reused": False, "job": {"id": "xai-protocol-test"}}
 
@@ -1098,6 +1111,7 @@ class RegisterServiceGrokTest(unittest.TestCase):
 
             accounts = account_store.list_accounts(redacted=False)
             self.assertEqual(protocol_calls, [accounts[0]["id"]])
+            self.assertNotIn("oauth_session_cookies", accounts[0])
             self.assertTrue(
                 any("Grok OAuth 授权已启动" in entry["text"] for entry in service.get()["grok_oauth_logs"])
             )

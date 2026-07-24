@@ -36,7 +36,14 @@ class XaiReferencePkceProtocol:
         if self.progress is not None:
             self.progress(stage, message)
 
-    def authorize(self, *, email: str, password: str, sso: str = "") -> dict[str, Any]:
+    def authorize(
+        self,
+        *,
+        email: str,
+        password: str,
+        sso: str = "",
+        session_cookies: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         python = self.reference_dir / ".venv" / "bin" / "python"
         protocol_file = self.reference_dir / "xconsole_client" / "oauth_protocol.py"
         if not python.is_file() or not protocol_file.is_file():
@@ -51,6 +58,7 @@ class XaiReferencePkceProtocol:
                 "email": str(email or "").strip(),
                 "password": str(password or "").strip(),
                 "sso": str(sso or "").strip(),
+                "session_cookies": dict(session_cookies or {}),
                 "proxy": self.proxy,
             },
             ensure_ascii=True,

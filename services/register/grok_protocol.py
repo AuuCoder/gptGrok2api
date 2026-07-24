@@ -1369,6 +1369,28 @@ class GrokProtocolClient:
         )
         return ",".join(entries) or "none"
 
+    def session_cookies(self) -> dict[str, str]:
+        """Return a transient cookie snapshot for the immediate PKCE handoff."""
+        values: dict[str, str] = {}
+        jar = getattr(self.session.cookies, "jar", None)
+        if jar is not None:
+            for cookie in jar:
+                name = str(getattr(cookie, "name", "") or "").strip()
+                value = str(getattr(cookie, "value", "") or "").strip()
+                if name and value:
+                    values[name] = value
+        if values:
+            return values
+        try:
+            raw = self.session.cookies.get_dict()
+        except Exception:
+            return {}
+        return {
+            str(name): str(value)
+            for name, value in raw.items()
+            if str(name).strip() and str(value).strip()
+        }
+
     def _prewarm_grok_session(self) -> None:
         if self._grok_session_warmed and self._cookie_value("grok_device_id"):
             return

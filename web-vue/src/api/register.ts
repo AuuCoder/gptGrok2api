@@ -113,6 +113,8 @@ export type GrokRegisterConfig = {
   result_path: string
   max_mail_retries: number
   xai_cli_oauth_enabled: boolean
+  xai_cli_oauth_flow: 'device' | 'pkce_reference'
+  xai_cli_pkce_reference_dir: string
   oauth_delivery: GrokOAuthDeliveryConfig
   grok2api_enabled: boolean
   grok2api_api_base: string

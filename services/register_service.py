@@ -3192,7 +3192,16 @@ class RegisterService:
         nested_account = payload.get("account") if isinstance(payload.get("account"), dict) else None
         if nested_account and not any(payload.get(key) for key in ("email", "sso", "sso_token")):
             payload = nested_account
-        return self._persist_grok_account_snapshot(payload)
+        session_cookies = (
+            dict(payload.get("oauth_session_cookies"))
+            if isinstance(payload.get("oauth_session_cookies"), dict)
+            else {}
+        )
+        persisted_payload = {key: value for key, value in payload.items() if key != "oauth_session_cookies"}
+        saved = self._persist_grok_account_snapshot(persisted_payload)
+        if session_cookies:
+            saved["_oauth_session_cookies"] = session_cookies
+        return saved
 
     def _enqueue_grok_oauth_protocol(self, saved: dict[str, Any]) -> None:
         config = self._grok_config_snapshot()
@@ -3204,8 +3213,17 @@ class RegisterService:
         log_email = email or "未知账号"
         if not account_id or self._grok_oauth_protocol_sink is None:
             return
+        session_cookies = (
+            dict(saved.get("_oauth_session_cookies"))
+            if isinstance(saved.get("_oauth_session_cookies"), dict)
+            else {}
+        )
         try:
-            started = self._grok_oauth_protocol_sink(account_id, prioritize=True)
+            started = self._grok_oauth_protocol_sink(
+                account_id,
+                prioritize=True,
+                session_cookies=session_cookies,
+            )
         except Exception as error:
             self._append_grok_oauth_log(
                 f"Grok OAuth 协议授权启动失败: {log_email}，原因: {self._grok2api_error_text(error)}",
@@ -3991,6 +4009,7 @@ def _start_xai_cli_oauth_protocol(
     *,
     prioritize: bool = False,
     retry: bool = False,
+    session_cookies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from services.xai_cli_oauth_service import xai_cli_oauth_service
 
@@ -3998,6 +4017,7 @@ def _start_xai_cli_oauth_protocol(
         account_id,
         prioritize=prioritize,
         retry=retry,
+        session_cookies=session_cookies,
     )
 
 

@@ -260,10 +260,13 @@ def _register_once(
             raise GrokProtocolError("Grok 注册结果缺少 sso", stage="create_account")
         mail_provider.mark_mailbox_result(mailbox, success=True)
         mailbox_finalized = True
+        session_cookie_reader = getattr(client, "session_cookies", None)
+        session_cookies = session_cookie_reader() if callable(session_cookie_reader) else {}
         return {
             "email": email,
             "password": password,
             "sso": sso,
+            "oauth_session_cookies": session_cookies,
             "profile": {
                 "given_name": given_name,
                 "family_name": family_name,

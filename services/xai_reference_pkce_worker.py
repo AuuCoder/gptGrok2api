@@ -27,6 +27,18 @@ def main() -> int:
     from xconsole_client.oauth_protocol import ProtocolOAuthClient
 
     sso = str(payload.get("sso") or "").strip()
+    session_cookies = (
+        {
+            str(name): str(value)
+            for name, value in payload.get("session_cookies", {}).items()
+            if str(name).strip() and str(value).strip()
+        }
+        if isinstance(payload.get("session_cookies"), dict)
+        else {}
+    )
+    if sso:
+        session_cookies.setdefault("sso", sso)
+        session_cookies.setdefault("sso-rw", sso)
     supported = {item.value for item in BrowserType}
     impersonate = "chrome146" if "chrome146" in supported else "chrome136"
     client = ProtocolOAuthClient(
@@ -41,7 +53,7 @@ def main() -> int:
             proxy=str(payload.get("proxy") or "").strip(),
             cliproxyapi_auth_dir=auth_dir,
             output_dir=None,
-            session_cookies={"sso": sso, "sso-rw": sso} if sso else None,
+            session_cookies=session_cookies or None,
         )
 
     token = result.token if isinstance(result.token, dict) else {}

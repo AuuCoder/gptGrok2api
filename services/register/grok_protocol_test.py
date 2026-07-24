@@ -872,6 +872,7 @@ class GrokWorkerTest(unittest.TestCase):
             "sso": "sso-token",
             "redirect_url": "https://grok.com/",
         }
+        client.session_cookies.return_value = {"sso": "sso-token", "session": "live-cookie"}
 
         log_messages: list[str] = []
         with patch.object(
@@ -884,6 +885,10 @@ class GrokWorkerTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["result"]["email"], "relay@icloud.example")
         self.assertEqual(result["result"]["sso"], "sso-token")
+        self.assertEqual(
+            result["result"]["oauth_session_cookies"],
+            {"sso": "sso-token", "session": "live-cookie"},
+        )
         self.assertEqual(result["result"]["source_type"], "protocol")
         client.verify_email_validation_code.assert_called_once_with(
             "relay@icloud.example",

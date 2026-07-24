@@ -195,6 +195,7 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             "password": "source-password",
             "sso": "source-sso",
         }
+        session_cookies = {"sso": "source-sso", "session": "live-cookie"}
         credential = {
             "access_token": _jwt({"sub": "pkce-subject", "email": "pkce@example.com", "exp": int(time.time()) + 3600}),
             "refresh_token": "pkce-refresh",
@@ -225,7 +226,10 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             "probe_account",
             new=AsyncMock(return_value={"status": "valid"}),
         ):
-            started = await self.service.start_protocol_authorization("grok-pkce-source")
+            started = await self.service.start_protocol_authorization(
+                "grok-pkce-source",
+                session_cookies=session_cookies,
+            )
             job_id = started["job"]["id"]
             for _ in range(50):
                 await asyncio.sleep(0)
@@ -239,6 +243,7 @@ class XaiCliOAuthServiceTest(unittest.IsolatedAsyncioTestCase):
             email="pkce@example.com",
             password="source-password",
             sso="source-sso",
+            session_cookies=session_cookies,
         )
 
     async def test_protocol_jobs_are_reused_per_source_account(self) -> None:

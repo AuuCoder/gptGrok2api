@@ -155,6 +155,8 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
   result_path: '/getTaskResult',
   max_mail_retries: 3,
   xai_cli_oauth_enabled: true,
+  xai_cli_oauth_flow: 'device',
+  xai_cli_pkce_reference_dir: '',
   oauth_delivery: {
     sub2api: {
       enabled: false,
@@ -287,6 +289,8 @@ export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig 
     result_path: String(input.result_path || defaultGrokRegisterConfig.result_path).trim(),
     max_mail_retries: Math.max(1, Math.min(20, Number(input.max_mail_retries) || defaultGrokRegisterConfig.max_mail_retries)),
     xai_cli_oauth_enabled: input.xai_cli_oauth_enabled !== false,
+    xai_cli_oauth_flow: input.xai_cli_oauth_flow === 'pkce_reference' ? 'pkce_reference' : 'device',
+    xai_cli_pkce_reference_dir: String(input.xai_cli_pkce_reference_dir || '').trim(),
     oauth_delivery: {
       sub2api: {
         enabled: Boolean(deliverySub2APIInput.enabled),

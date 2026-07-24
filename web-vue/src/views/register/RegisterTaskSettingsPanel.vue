@@ -605,8 +605,23 @@
           />
           <span>
             <strong>注册后自动协议授权</strong>
-            <small>默认开启；使用新账号完成 xAI Device Code OAuth，并加入 Grok 4.5 账号池。</small>
+            <small v-if="config.grok.xai_cli_oauth_flow === 'pkce_reference'">使用公网版 Authorization Code + PKCE，并加入 Grok 4.5 账号池。</small>
+            <small v-else>使用 xAI Device Code OAuth，并加入 Grok 4.5 账号池。</small>
           </span>
+        </label>
+
+        <label
+          v-if="config.grok.xai_cli_oauth_flow === 'pkce_reference'"
+          class="register-field register-field--full"
+        >
+          <span class="register-label">公网版 PKCE 目录</span>
+          <Input
+            v-model.trim="config.grok.xai_cli_pkce_reference_dir"
+            block
+            root-class="font-mono"
+            placeholder="/path/to/Grok号池_公网中转版"
+            :disabled="config.enabled"
+          />
         </label>
 
         <label class="register-field">
