@@ -2,6 +2,30 @@
 
 GPTGrok2API 是一个自托管的 GPT 与 Grok 统一网关，将已接入的订阅账号能力转换为 OpenAI 兼容 API，并提供账号、代理、注册、日志、图片和运行状态管理控制台。
 
+## 赞助商
+
+<div align="center">
+  <a href="https://www.ipwo.net/?ref=githubgptGrok2api">
+    <img src="docs/images/ipwo-banner.jpg" alt="IPWO 住宅代理 Banner" width="100%">
+  </a>
+</div>
+
+<table>
+  <tr>
+    <td align="center" width="28%">
+      <a href="https://www.ipwo.net/?ref=githubgptGrok2api">
+        <img src="docs/images/ipwo-sponsor.jpg" alt="IPWO 住宅代理" width="220">
+      </a>
+    </td>
+    <td>
+      <strong>IPWO 住宅代理</strong><br>
+      IPWO 提供免费测试，静态 IP 低至 <strong>9.9 元/月/条</strong>，9 折优惠码：<code>0202</code>。借助 IPWO 住宅代理，为 MCP 驱动的 AI 应用提供灵活的网络连接选择。<br>
+      覆盖 195+ 国家和地区，支持动态与静态住宅 IP 与不限量代理，适用于跨地区信息获取、API 访问及自动化任务。<br>
+      👉 <a href="https://www.ipwo.net/?ref=githubgptGrok2api">访问 IPWO</a>
+    </td>
+  </tr>
+</table>
+
 ## 社区入口
 
 - Telegram：[加入 Telegram 群组](https://t.me/+olcHGKKXEwRmOTQx)
